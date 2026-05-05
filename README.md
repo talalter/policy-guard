@@ -4,6 +4,14 @@ Detects when an LLM response contradicts its source context — built for API an
 
 Two-stage pipeline: a **ModernCE NLI cross-encoder** (local, 8K-token context) handles sentence-level contradictions for free; uncertain pairs escalate to **GPT-4o** for multi-hop reasoning.
 
+![Checker UI](docs/checker-ui.png)
+*The Checker tab surfaces the contradicting span from the source and the conflicting claim in the response side-by-side, with a per-finding confidence score and method label.*
+
+![Benchmark — RAGTruth](docs/benchmark-ragtruth.png)
+*Benchmark results on the RAGTruth sample (100 examples). The Ensemble method achieves the highest recall (90%) at roughly half the cost of GPT-4o alone.*
+
+![Benchmark — Cloud Security](docs/benchmark-cloud-security.png)
+*On domain-specific cloud security documentation, GPT-4o reaches 96.2% F1 with perfect recall, while the NLI-only method runs fully locally at $0.00/call.*
 
 **Stack:** FastAPI · React/Vite · ModernCE · GPT-4o structured outputs · Pydantic-settings
 
