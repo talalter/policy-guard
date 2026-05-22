@@ -1,12 +1,14 @@
 import { useState, useEffect } from 'react'
-
-const API_BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
+import { fetchBenchmarkDatasets, fetchBenchmarkResults } from '../api/client'
 
 const METHOD_LABELS = {
   nli: 'NLI only',
-  llm: 'GPT-4o only',
+  llm: 'GPT-5.4-mini only',
   ensemble: 'Ensemble',
 }
+
+const DIFFICULTY_ORDER = ['easy', 'medium', 'hard']
+const DIFFICULTY_N = { easy: 30, medium: 55, hard: 35 }
 
 function PctCell({ value }) {
   return <td className="metric-cell">{(value * 100).toFixed(1)}%</td>
@@ -34,11 +36,7 @@ export default function BenchmarkTab() {
 
   // Load available datasets once on mount
   useEffect(() => {
-    fetch(`${API_BASE}/benchmark-datasets`)
-      .then(r => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.json()
-      })
+    fetchBenchmarkDatasets()
       .then(data => {
         setDatasets(data)
         if (data.length > 0) setSelectedKey(data[0].key)
@@ -54,11 +52,7 @@ export default function BenchmarkTab() {
     if (!selectedKey) return
     setLoading(true)
     setResults(null)
-    fetch(`${API_BASE}/benchmark-results?dataset=${selectedKey}`)
-      .then(r => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.json()
-      })
+    fetchBenchmarkResults(selectedKey)
       .then(data => {
         setResults(data)
         setLoading(false)
@@ -74,7 +68,7 @@ export default function BenchmarkTab() {
       <div className="benchmark-tab">
         <p className="error">Could not load benchmark results: {error}</p>
         <p style={{ marginTop: '0.75rem', color: 'var(--text-muted)', fontSize: '13px' }}>
-          Generate results first: <code>python -m backend.benchmark</code>
+          Generate results first: <code>python -m backend.tools.benchmark</code>
         </p>
       </div>
     )
@@ -125,7 +119,35 @@ export default function BenchmarkTab() {
         </tbody>
       </table>
 
-      
+      {results.some(r => r.per_difficulty) && (
+        <div style={{ marginTop: '2rem' }}>
+          <h3 style={{ marginBottom: '0.5rem', fontSize: '14px', fontWeight: 600 }}>
+            F1 by Difficulty
+          </h3>
+          <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '0.75rem' }}>
+            {DIFFICULTY_ORDER.map(d => `n≈${DIFFICULTY_N[d]} ${d}`).join(' · ')}
+          </p>
+          <table className="benchmark-table">
+            <thead>
+              <tr>
+                <th>Method</th>
+                {DIFFICULTY_ORDER.map(d => <th key={d}>{d.charAt(0).toUpperCase() + d.slice(1)}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {results.map(r => (
+                <tr key={r.method}>
+                  <td className="method-cell">{METHOD_LABELS[r.method] ?? r.method}</td>
+                  {DIFFICULTY_ORDER.map(d => {
+                    const f1 = r.per_difficulty?.[d]?.f1
+                    return <td key={d} className="metric-cell">{f1 != null ? (f1 * 100).toFixed(1) + '%' : '—'}</td>
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   )
 }

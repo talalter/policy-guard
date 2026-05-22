@@ -128,6 +128,49 @@ body {
 .run-btn:hover:not(:disabled) { opacity: 0.85; }
 .run-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
+/* ── Method toggle ──────────────────────────────────────────────────────── */
+.method-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.method-toggle {
+  display: flex;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 3px;
+  gap: 2px;
+}
+
+.method-toggle__btn {
+  padding: 5px 16px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: calc(var(--radius) - 2px);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  letter-spacing: 0.02em;
+}
+
+.method-toggle__btn--active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.method-toggle__btn:not(.method-toggle__btn--active):hover {
+  color: var(--text);
+}
+
+.method-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
 /* ── Result panel ───────────────────────────────────────────────────────── */
 .result-panel {
   padding: 1.5rem;
@@ -370,4 +413,259 @@ code {
   font-size: 12px;
   font-family: 'SF Mono', 'Fira Code', monospace;
   color: var(--text);
+}
+
+/* ── Feedback buttons (ResultPanel) ─────────────────────────────────────── */
+.feedback-buttons {
+  display: flex;
+  gap: 4px;
+  margin-left: 4px;
+}
+
+.feedback-btn {
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  padding: 0;
+}
+
+.feedback-btn:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.feedback-btn:disabled { opacity: 0.45; cursor: default; }
+
+.feedback-btn--active {
+  background: var(--success);
+  border-color: var(--success);
+  color: #fff;
+}
+
+.feedback-btn--fp.feedback-btn--active {
+  background: var(--danger);
+  border-color: var(--danger);
+}
+
+/* ── History tab ────────────────────────────────────────────────────────── */
+.history-tab {
+  padding: 2rem;
+  max-width: 1100px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.history-tab--center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+}
+
+.stats-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 13px;
+  margin-bottom: 1.5rem;
+}
+
+.stats-item { color: var(--text-muted); }
+.stats-item strong { color: var(--text); font-variant-numeric: tabular-nums; }
+.stats-sep { color: var(--border); }
+
+.context-snippet {
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.history-empty {
+  color: var(--text-muted);
+  text-align: center;
+  padding: 3rem 0;
+  font-size: 13px;
+}
+
+.history-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 0.75rem;
+}
+
+.history-row-clickable {
+  cursor: pointer;
+}
+
+.history-row-clickable:hover td {
+  background: var(--surface-2);
+}
+
+.delete-btn {
+  opacity: 0;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 6px;
+  cursor: pointer;
+  transition: opacity 0.15s, background 0.15s, color 0.15s, border-color 0.15s;
+  white-space: nowrap;
+}
+
+.history-row-clickable:hover .delete-btn {
+  opacity: 1;
+}
+
+.delete-btn:hover {
+  background: rgba(226, 75, 74, 0.12);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.delete-btn--confirm {
+  opacity: 1;
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+
+.delete-btn--confirm:hover {
+  background: var(--danger);
+  color: #fff;
+}
+
+/* ── Run detail modal ───────────────────────────────────────────────────── */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 2rem;
+}
+
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  max-width: 780px;
+  width: 100%;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.875rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.modal-title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.modal-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+  transition: color 0.15s;
+}
+
+.modal-close:hover { color: var(--text); }
+
+.modal-body {
+  overflow-y: auto;
+  padding: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.modal-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.modal-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  background: var(--surface-2);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+
+.modal-timestamp {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
+.modal-section-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.modal-text-block {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow-y: auto;
+  font-family: inherit;
+}
+
+.modal-no-violations {
+  font-size: 13px;
+  color: var(--success);
+  font-weight: 500;
 }
