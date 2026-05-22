@@ -1,87 +1,49 @@
-"""Manual test script for the confidence-based router.
+"""Integration tests for the confidence-based Router pipeline.
 
-Loads examples from data/examples.json and runs each through the full
-NLI → routing → LLM-escalation pipeline.  Shows which contradictions
-were caught by NLI vs escalated to GPT-4o and prints routing metadata.
-
-Run from the backend/ directory:
-    python test_router.py
-
-To add examples, edit data/examples.json — do not add them here.
+Requires local model weights and a valid LLM API key.
+Run with: pytest -m integration
 """
 
-import json
-import logging
-import pathlib
+import pytest
 
-from dotenv import load_dotenv
-
-load_dotenv(pathlib.Path(__file__).parent.parent / ".env")
-
-from backend.core import Router
-
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-
-_EXAMPLES_PATH = pathlib.Path(__file__).parent.parent / "data" / "examples.json"
+pytestmark = pytest.mark.integration
 
 
-def load_examples() -> list[dict]:
-    """Load labeled examples from the shared data file."""
-    with _EXAMPLES_PATH.open() as f:
-        return json.load(f)
+def test_routes_contradiction_via_ensemble(router):
+    """A clear numerical contradiction is caught by the ensemble pipeline."""
+    context = "The session token expires after 15 minutes of inactivity."
+    response = "Session tokens expire after 60 minutes of inactivity."
+    contradictions, metadata = router.route(context, response)
+    assert contradictions, "Expected router to detect a timeout contradiction"
+    assert metadata["llm_called"], "Expected LLM to be called for this case"
 
 
-def run_case(router: Router, example: dict) -> bool:
-    """Run a single example through the router and print results. Returns True if PASS."""
-    print(f"\n{'='*60}")
-    print(f"CASE [{example['id']}]: {example['contradiction_type'].upper()} — {example.get('notes', '')}")
-    print(f"{'='*60}")
-    print(f"Context:  {example['context'][:120]}{'...' if len(example['context']) > 120 else ''}")
-    print(f"Response: {example['response'][:120]}{'...' if len(example['response']) > 120 else ''}")
-    print(f"Expected contradiction: {example['has_contradiction']}")
-    print()
-
-    contradictions, meta = router.route(
-        context=example["context"],
-        response=example["response"],
-    )
-
-    print(f"Routing metadata:")
-    print(f"  NLI pairs checked : {meta['nli_pairs_checked']}")
-    print(f"  NLI caught        : {meta['nli_caught']}")
-    print(f"  Escalated to LLM  : {meta['llm_escalated']}")
-    print(f"  LLM caught        : {meta['llm_caught']}")
-    print(f"  After dedup       : {meta['after_dedup']}")
-    print()
-
-    print(f"Contradictions found: {len(contradictions)}")
-    for c in contradictions:
-        print(f"  [{c.method.value:8}] [{c.severity.value:9}] conf={c.confidence:.2f}")
-        print(f"    Response span: {c.response_span!r}")
-        print(f"    Context span:  {c.context_span!r}")
-        print(f"    Explanation:   {c.explanation}")
-
-    passed = bool(contradictions) == example["has_contradiction"]
-    print()
-    print(f"Result: {'PASS' if passed else 'FAIL'}")
-    return passed
+def test_metadata_keys_are_present(router):
+    """route() always returns the expected metadata keys."""
+    context = "The endpoint accepts GET requests only."
+    response = "The endpoint accepts GET requests only."
+    _, metadata = router.route(context, response)
+    expected_keys = {
+        "nli_pairs_checked", "nli_candidates", "llm_escalated",
+        "llm_called", "llm_caught", "after_dedup",
+    }
+    assert expected_keys.issubset(metadata.keys()), f"Missing keys: {expected_keys - metadata.keys()}"
 
 
-def main() -> None:
-    """Load the router once, then run all examples from data/examples.json."""
-    examples = load_examples()
-    print(f"Loaded {len(examples)} examples from {_EXAMPLES_PATH}")
-    print("Initialising router (loads NLI model + OpenAI client)...")
-    router = Router()
-    print("Ready.\n")
-
-    results = [run_case(router, ex) for ex in examples]
-
-    passed = sum(results)
-    total = len(results)
-    print(f"\n{'='*60}")
-    print(f"Done. {passed}/{total} passed.")
+def test_faithful_response_returns_empty(router):
+    """A faithful response produces no contradictions."""
+    context = "The API uses HTTPS for all connections."
+    response = "All API connections use HTTPS."
+    contradictions, _ = router.route(context, response)
+    assert not contradictions, f"Faithful response incorrectly flagged: {contradictions}"
 
 
-if __name__ == "__main__":
-    main()
+def test_benchmark_accuracy(router, examples):
+    """Full ensemble achieves at least 85% accuracy on the RAGTruth benchmark sample."""
+    correct = 0
+    for ex in examples:
+        contradictions, _ = router.route(ex["context"], ex["response"])
+        if bool(contradictions) == ex["has_contradiction"]:
+            correct += 1
+    accuracy = correct / len(examples)
+    assert accuracy >= 0.85, f"Router accuracy {accuracy:.1%} is below the 85% floor on {len(examples)} examples"

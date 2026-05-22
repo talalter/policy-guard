@@ -7,10 +7,10 @@ mini-batches via ModernBERT, yielding results as each mini-batch completes.
 
 ModernBERT advantages over DeBERTa-v3:
 - Flash Attention 2 for faster inference on CUDA
-- 8 192-token context window (vs 512) — handles long LLM outputs without truncation
+- 8 192-token context window (vs 512) - handles long LLM outputs without truncation
 - Rotary position embeddings (RoPE) that generalise better to out-of-distribution lengths
 
-Default model: dleemiller/ModernCE-large-nli — a cross-encoder fine-tuned on
+Default model: dleemiller/ModernCE-base-nli - a cross-encoder fine-tuned on
 AllNLI (MNLI + SNLI), achieving 92% on MNLI-mismatched. The "CE" suffix
 signals it is purpose-built for pairwise sequence classification, exactly the
 pattern used here.
@@ -28,7 +28,7 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from backend.config import settings
 from backend.models import NLIResult, SentencePair
-from backend.utils.text import get_stopwords, split_sentences
+from backend.utils.text import flatten_tool_context, is_tool_context, split_sentences
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +37,17 @@ _BI_ENCODER_MODEL = settings.bi_encoder_model
 _NLI_TOP_K = settings.nli_top_k
 _NLI_MIN_SIMILARITY = settings.nli_min_similarity
 _NLI_MINI_BATCH_SIZE = settings.nli_mini_batch_size
-# ModernCE-large-nli label order (confirmed from model config.json)
 _NLI_MAX_LENGTH = settings.nli_max_length
 
-_LABEL2IDX = {"contradiction": 0, "entailment": 1, "neutral": 2}
+
+# BGE models require an instruction prefix on the query (hypothesis) side only.
+# Passage (premise) encodings are left as-is.
+_BGE_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
+
+
+def _needs_query_prefix(model_name: str) -> bool:
+    """Return True for BGE bi-encoders that require asymmetric query prefixing."""
+    return "bge" in model_name.lower()
 
 
 def _log_pair_result(
@@ -54,7 +61,7 @@ def _log_pair_result(
 ) -> None:
     """Log one scored pair: INFO for confirmed contradictions, DEBUG for everything else."""
     if winning_label == "contradiction":
-        log.info(
+        log.debug(
             "Contradiction hit conf=%.3f contradiction=%.3f entailment=%.3f neutral=%.3f",
             confidence,
             contradiction_score,
@@ -93,14 +100,20 @@ class NLIScorer:
         self._tokenizer = AutoTokenizer.from_pretrained(_MODEL_NAME)
         self._model = AutoModelForSequenceClassification.from_pretrained(_MODEL_NAME)
         self._model.eval()
-        logger.info("NLI model loaded successfully")
+        self._label2idx = {v.lower(): k for k, v in self._model.config.id2label.items()}
+        logger.info("NLI model loaded — label map: %s", self._label2idx)
 
     def _compute_similarity_matrix(
         self, premises: list[str], hypotheses: list[str]
     ) -> torch.Tensor:
         """Encode premises and hypotheses, return (M x N) cosine similarity matrix."""
-        premise_embs = self._bi_encoder.encode(premises, convert_to_tensor=True)
-        hyp_embs = self._bi_encoder.encode(hypotheses, convert_to_tensor=True)
+        premise_embs = self._bi_encoder.encode(premises, convert_to_tensor=True, show_progress_bar=False)
+        queries = (
+            [_BGE_QUERY_PREFIX + h for h in hypotheses]
+            if _needs_query_prefix(_BI_ENCODER_MODEL)
+            else hypotheses
+        )
+        hyp_embs = self._bi_encoder.encode(queries, convert_to_tensor=True, show_progress_bar=False)
         return util.cos_sim(premise_embs, hyp_embs)  # shape: (M, N)
 
     def _build_pairs(
@@ -110,24 +123,21 @@ class NLIScorer:
         sim_matrix: torch.Tensor,
         top_k: int,
     ) -> tuple[list[SentencePair], list[float]]:
-        """Select top-K premise candidates per hypothesis, apply filters.
+        """Select top-K premise candidates per hypothesis, apply similarity threshold.
 
-        Two filters are applied after top-K selection:
-        - Similarity threshold: drops pairs below _NLI_MIN_SIMILARITY.
-        - Lexical gate: drops pairs that share no content words, preventing
-          the bi-encoder from matching sentences on incidental shared vocabulary.
+        Filters pairs below _NLI_MIN_SIMILARITY. The cross-encoder is the right
+        place to reject bad pairs — no lexical overlap gate is applied here, so
+        policy rules that use different vocabulary from the agent action are not
+        silently dropped before NLI sees them.
 
         Returns:
             Parallel (pairs, sim_scores) lists.
         """
         pairs: list[SentencePair] = []
         sim_scores: list[float] = []
-        idx = 0
         k = min(top_k, len(premises))
-        stopwords = get_stopwords()
 
         for h_idx, hypothesis in enumerate(hypotheses):
-            h_tokens = {t.lower() for t in hypothesis.split()} - stopwords
             top_indices = sim_matrix[:, h_idx].topk(k).indices.tolist()
 
             for p_idx in top_indices:
@@ -136,19 +146,8 @@ class NLIScorer:
                 if sim_score < _NLI_MIN_SIMILARITY:
                     continue
 
-                p_tokens = {t.lower() for t in premises[p_idx].split()} - stopwords
-                if not (p_tokens & h_tokens):
-                    continue
-
-                pairs.append(
-                    SentencePair(
-                        premise=premises[p_idx],
-                        hypothesis=hypothesis,
-                        pair_index=idx,
-                    )
-                )
+                pairs.append(SentencePair(premise=premises[p_idx], hypothesis=hypothesis))
                 sim_scores.append(sim_score)
-                idx += 1
 
         return pairs, sim_scores
 
@@ -173,9 +172,9 @@ class NLIScorer:
 
         batch_results = []
         for pair, pair_probs in zip(pairs, probs):
-            contradiction_score = float(pair_probs[_LABEL2IDX["contradiction"]])
-            entailment_score = float(pair_probs[_LABEL2IDX["entailment"]])
-            neutral_score = float(pair_probs[_LABEL2IDX["neutral"]])
+            contradiction_score = float(pair_probs[self._label2idx["contradiction"]])
+            entailment_score = float(pair_probs[self._label2idx["entailment"]])
+            neutral_score = float(pair_probs[self._label2idx["neutral"]])
 
             label_scores = {
                 "contradiction": contradiction_score,
@@ -190,6 +189,8 @@ class NLIScorer:
                 label=winning_label,
                 confidence=confidence,
                 contradiction_score=contradiction_score,
+                entailment_score=entailment_score,
+                neutral_score=neutral_score,
             )
 
             _log_pair_result(
@@ -232,6 +233,11 @@ class NLIScorer:
         Yields:
             NLIResult for each scored pair, highest-similarity pairs first.
         """
+        tool_ctx = is_tool_context(context)
+        if tool_ctx:
+            context = flatten_tool_context(context)
+            logger.debug("Tool call context detected — applied prose normalisation")
+
         premises = split_sentences(context)
         hypotheses = split_sentences(response)
 

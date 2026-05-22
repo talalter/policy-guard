@@ -1,22 +1,22 @@
-"""Confidence-based router that orchestrates NLI scoring and LLM escalation.
+"""Confidence-based router that orchestrates NLI scoring and LLM arbitration.
 
 Architecture:
     1. Stream NLIResult objects from NLIScorer in one pass.
-    2. Branch each result into a 'confident' bucket (≥ threshold) or an
-       'uncertain' bucket (< threshold) without buffering the full list.
-    3. Convert confident contradiction pairs directly to Contradiction objects.
-    4. Escalate uncertain pairs to LLMJudge in a single batched call.
-    5. Merge both lists and deduplicate overlapping response spans using
-       Jaccard similarity so the same contradiction is never shown twice.
+    2. Branch each result into a 'candidate' bucket (≥ threshold) or an
+       'uncertain' bucket (≥ escalation_floor) without buffering the full list.
+    3. Pass all NLI pairs (candidates + uncertain) to the LLM judge as hints.
+    4. The LLM makes every final output decision — NLI narrows the search space,
+       never bypasses review.
+    5. Deduplicate overlapping response spans using Jaccard similarity.
 
-This is a production ML routing pattern: keep cost near zero for the common
-case (NLI resolves it), pay only for the hard cases (multi-hop reasoning).
+NLI's role is pre-filtering: finding sentence pairs worth examining, and skipping
+the LLM entirely when the document is clearly neutral (peak NLI score below floor).
 """
 
 import logging
 
 from backend.config import settings
-from backend.core.llm_judge import LLMJudge  # type: ignore
+from backend.core.llm_judge import BaseLLMJudge, create_llm_judge
 from backend.core.nli_scorer import NLIScorer
 from backend.models import Contradiction, DetectionMethod, NLIResult, Severity
 from backend.utils.dedup import deduplicate
@@ -24,21 +24,17 @@ from backend.utils.dedup import deduplicate
 logger = logging.getLogger(__name__)
 
 _THRESHOLD = settings.nli_confidence_threshold
-
-# NLI confidence cutoff for DIRECT vs PARTIAL severity assignment.
 _DIRECT_CONFIDENCE_CUTOFF = settings.direct_severity_threshold
-
-# Minimum contradiction_score for a pair to be escalated to GPT-4o.
-# Intentionally independent of _THRESHOLD — changing the confidence threshold
-# should not silently move the escalation floor.
 _ESCALATION_FLOOR = settings.nli_escalation_floor
+_LLM_SIGNAL_FLOOR = settings.llm_signal_floor
+_FORCE_LLM = settings.force_llm
 
 
 def nli_to_contradiction(result: NLIResult) -> Contradiction:
     """Convert a high-confidence NLI contradiction result to a Contradiction object.
 
-    Severity is inferred from confidence because NLI operates on sentence pairs
-    and cannot detect multi-hop patterns — those are reserved for the LLM path.
+    Used by the benchmark's NLI-only evaluation path. Not used in the ensemble
+    route() — NLI candidates are passed to the LLM as hints there.
     """
     severity = (
         Severity.DIRECT
@@ -61,42 +57,47 @@ def nli_to_contradiction(result: NLIResult) -> Contradiction:
 def _partition_results(
     nli_stream,
     threshold: float,
-) -> tuple[list[Contradiction], list[NLIResult], int]:
-    """Consume the NLI stream in one pass, partitioning into confident and uncertain.
+) -> tuple[list[NLIResult], list[NLIResult], int, float]:
+    """Consume the NLI stream in one pass, partitioning into candidates and uncertain.
+
+    Candidates: NLI is confident (label=contradiction AND confidence ≥ threshold).
+    Uncertain:  NLI sees signal but is not confident (contradiction_score ≥ floor).
+    Both lists are passed to the LLM judge as hints; neither is output directly.
 
     Returns:
-        (nli_contradictions, uncertain_pairs, total_pairs_checked)
+        (candidate_pairs, uncertain_pairs, total_pairs_checked, max_contradiction_score)
     """
-    nli_contradictions: list[Contradiction] = []
+    candidate_pairs: list[NLIResult] = []
     uncertain_pairs: list[NLIResult] = []
     total_pairs = 0
+    max_contradiction_score = 0.0
 
     for nli_result in nli_stream:
         total_pairs += 1
+        max_contradiction_score = max(max_contradiction_score, nli_result.contradiction_score)
         if nli_result.label == "contradiction" and nli_result.confidence >= threshold:
-            nli_contradictions.append(nli_to_contradiction(nli_result))
+            candidate_pairs.append(nli_result)
             logger.debug(
-                "NLI confident contradiction (conf=%.2f): %r → %r",
+                "NLI candidate (conf=%.2f): %r → %r",
                 nli_result.confidence,
                 nli_result.pair.premise[:60],
                 nli_result.pair.hypothesis[:60],
             )
         elif nli_result.contradiction_score >= _ESCALATION_FLOOR:
-            # Escalate pairs where NLI sees some contradiction signal but is not
-            # confident enough — includes low-confidence "contradiction" labels.
+            # NLI sees some contradiction signal but is not confident — send to LLM.
             # Purely neutral pairs (low contradiction_score) are skipped entirely.
             uncertain_pairs.append(nli_result)
             logger.debug(
-                "Escalating uncertain pair (contradiction_score=%.2f): %r",
+                "Uncertain pair (contradiction_score=%.2f): %r",
                 nli_result.contradiction_score,
                 nli_result.pair.hypothesis[:60],
             )
 
-    return nli_contradictions, uncertain_pairs, total_pairs
+    return candidate_pairs, uncertain_pairs, total_pairs, max_contradiction_score
 
 
 class Router:
-    """Orchestrates NLIScorer and LLMJudge with confidence-based routing.
+    """Orchestrates NLIScorer and LLMJudge with NLI pre-filtering.
 
     Instantiates both sub-components once so their models stay resident in
     memory across multiple calls — critical for low-latency production use.
@@ -106,14 +107,14 @@ class Router:
         """Load NLI and LLM components at construction time."""
         logger.info("Initialising Router (threshold=%.2f)", _THRESHOLD)
         self._scorer = NLIScorer()
-        self._judge = LLMJudge()
+        self._judge = create_llm_judge()
 
     def get_scorer(self) -> NLIScorer:
         """Return the shared NLIScorer instance."""
         return self._scorer
 
-    def get_judge(self) -> LLMJudge:
-        """Return the shared LLMJudge instance."""
+    def get_judge(self) -> BaseLLMJudge:
+        """Return the shared LLM judge instance."""
         return self._judge
 
     def route(
@@ -122,9 +123,9 @@ class Router:
         """Run the full detection pipeline and return contradictions + metadata.
 
         Steps:
-            1. Stream NLI results and partition into confident / uncertain.
-            2. Escalate uncertain pairs to GPT-4o in one batched call.
-            3. Merge, deduplicate by span overlap, return sorted by confidence.
+            1. Stream NLI results and partition into candidates / uncertain.
+            2. Pass all NLI pairs to the LLM judge as focused hints.
+            3. Deduplicate by span overlap, return sorted by confidence.
 
         Args:
             context: Source document the response should be faithful to.
@@ -136,47 +137,60 @@ class Router:
                 - dict with routing metadata for ContradictionReport.
         """
         nli_stream = self._scorer.score(context, response)
-        nli_contradictions, uncertain_pairs, total_pairs = _partition_results(
+        candidate_pairs, uncertain_pairs, total_pairs, max_nli_score = _partition_results(
             nli_stream, _THRESHOLD
         )
 
         logger.info(
-            "NLI: %d pairs checked, %d confident contradictions, %d escalated",
+            "NLI: %d pairs checked, %d candidates, %d uncertain, peak_score=%.2f",
             total_pairs,
-            len(nli_contradictions),
+            len(candidate_pairs),
             len(uncertain_pairs),
+            max_nli_score,
         )
 
-        llm_contradictions: list[Contradiction] = []
-        # Call the LLM when there are uncertain pairs to validate, OR when NLI
-        # found zero confident contradictions — the latter ensures multi-hop cases
-        # (where NLI sees no signal at the sentence-pair level) always reach GPT-4o
-        # for a full-document reasoning pass.
-        if uncertain_pairs or not nli_contradictions:
-            llm_contradictions = self._judge.judge(
-                context=context,
-                response=response,
-                uncertain_pairs=uncertain_pairs,
-            )
-            logger.info("LLM judge returned %d contradiction(s)", len(llm_contradictions))
+        llm_should_run = _FORCE_LLM or max_nli_score >= _LLM_SIGNAL_FLOOR
 
-        all_contradictions = deduplicate(nli_contradictions + llm_contradictions)
+        if not llm_should_run:
+            logger.info(
+                "LLM skipped — peak NLI score %.2f is below signal floor %.2f",
+                max_nli_score,
+                _LLM_SIGNAL_FLOOR,
+            )
+            return [], {
+                "nli_pairs_checked": total_pairs,
+                "nli_candidates": 0,
+                "llm_escalated": 0,
+                "llm_called": False,
+                "llm_caught": 0,
+                "after_dedup": 0,
+            }
+
+        llm_contradictions = self._judge.judge(
+            context=context,
+            response=response,
+            candidate_pairs=candidate_pairs,
+            uncertain_pairs=uncertain_pairs,
+        )
+        logger.info("LLM judge returned %d contradiction(s)", len(llm_contradictions))
+
+        all_contradictions = deduplicate(llm_contradictions)
         all_contradictions.sort(key=lambda c: c.confidence, reverse=True)
 
         metadata = {
             "nli_pairs_checked": total_pairs,
-            "nli_caught": len(nli_contradictions),
+            "nli_candidates": len(candidate_pairs),
             "llm_escalated": len(uncertain_pairs),
+            "llm_called": True,
             "llm_caught": len(llm_contradictions),
             "after_dedup": len(all_contradictions),
         }
 
         logger.info(
-            "Router complete: %d unique contradiction(s) (nli=%d, llm=%d, dedup_dropped=%d)",
+            "Router complete: %d unique contradiction(s) (llm=%d, dedup_dropped=%d)",
             len(all_contradictions),
-            len(nli_contradictions),
             len(llm_contradictions),
-            (len(nli_contradictions) + len(llm_contradictions)) - len(all_contradictions),
+            len(llm_contradictions) - len(all_contradictions),
         )
 
         return all_contradictions, metadata

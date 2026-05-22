@@ -2,7 +2,7 @@
 
 from enum import Enum
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class Severity(str, Enum):
@@ -17,10 +17,14 @@ class DetectionMethod(str, Enum):
     ENSEMBLE = "ensemble"
 
 
+class FeedbackVerdict(str, Enum):
+    CONFIRMED = "confirmed"
+    FALSE_POSITIVE = "false_positive"
+
+
 class SentencePair(BaseModel):
     premise: str             # sentence from context
     hypothesis: str          # sentence from response
-    pair_index: int          # position in the cross-product matrix
 
 
 class NLIResult(BaseModel):
@@ -28,6 +32,8 @@ class NLIResult(BaseModel):
     label: str               # "entailment" | "neutral" | "contradiction"
     confidence: float        # softmax probability of the winning label
     contradiction_score: float  # raw softmax score for the contradiction class
+    entailment_score: float = 0.0
+    neutral_score: float = 0.0
 
 
 class Contradiction(BaseModel):
@@ -40,17 +46,50 @@ class Contradiction(BaseModel):
 
 
 class ContradictionReport(BaseModel):
+    run_id: str | None = None          # populated when MongoDB persistence is enabled
     faithfulness_score: float          # 0-1, higher = more faithful
     contradictions: list[Contradiction]
     method_used: DetectionMethod
     nli_pairs_checked: int
-    llm_escalations: int               # how many pairs were sent to GPT-4o
+    llm_escalations: int               # how many sentence pairs were escalated to the LLM judge
     processing_time_ms: float
 
 
 class CheckRequest(BaseModel):
+    context: str = Field(..., max_length=50_000)
+    response: str = Field(..., max_length=50_000)
+
+
+class FeedbackRequest(BaseModel):
+    contradiction_index: int
+    verdict: FeedbackVerdict
+
+
+class HistoryItem(BaseModel):
+    run_id: str
+    timestamp: str                     # ISO 8601
+    faithfulness_score: float
+    contradiction_count: int
+    method_used: str
+    provider: str
+    context_snippet: str               # first 100 chars of context
+
+
+class HistoryDetail(BaseModel):
+    run_id: str
+    timestamp: str                     # ISO 8601
+    faithfulness_score: float
+    method_used: str
+    provider: str
     context: str
     response: str
+    contradictions: list[Contradiction]
+
+
+class StatsResponse(BaseModel):
+    total_runs: int
+    total_contradictions: int
+    confirmed_rate: float              # fraction of feedback marked "confirmed"
 
 
 class BenchmarkResult(BaseModel):
@@ -62,6 +101,6 @@ class BenchmarkResult(BaseModel):
     f1_ci_high: float              # bootstrap 95% CI upper bound
     fpr: float                     # false positive rate: FP / (FP + TN)
     auc_roc: float                 # threshold-independent discrimination score
-    per_severity: dict[str, dict[str, float]]  # {type: {precision, recall, f1}}
+    per_difficulty: dict[str, dict[str, float]]  # {easy|medium|hard: {precision, recall, f1}}
     avg_latency_ms: float
     estimated_cost_per_call: float

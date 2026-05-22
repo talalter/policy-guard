@@ -1,89 +1,55 @@
-"""Manual test script for the Aggregator.
+"""Unit tests for Aggregator — no model loading required."""
 
-Runs the full pipeline (Router → Aggregator) on every example in
-data/examples.json and prints the final ContradictionReport for each.
-This is the closest thing to an end-to-end test before the FastAPI layer exists.
+import pytest
 
-Run from the backend/ directory:
-    python test_aggregator.py
-"""
-
-import json
-import logging
-import pathlib
-import time
-
-from dotenv import load_dotenv
-
-load_dotenv(pathlib.Path(__file__).parent.parent / ".env")
-
-from backend.core import Aggregator, Router
-
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-
-_EXAMPLES_PATH = pathlib.Path(__file__).parent.parent / "data" / "examples.json"
+from backend.models import Contradiction, DetectionMethod, Severity
 
 
-def load_examples() -> list[dict]:
-    """Load labeled examples from the shared data file."""
-    with _EXAMPLES_PATH.open() as f:
-        return json.load(f)
-
-
-def run_case(router: Router, agg: Aggregator, example: dict) -> bool:
-    """Run one example through the full pipeline and print the report. Returns True if PASS."""
-    print(f"\n{'='*60}")
-    print(f"CASE [{example['id']}]: {example['contradiction_type'].upper()} — {example.get('notes', '')}")
-    print(f"{'='*60}")
-    print(f"Context:  {example['context'][:120]}{'...' if len(example['context']) > 120 else ''}")
-    print(f"Response: {example['response'][:120]}{'...' if len(example['response']) > 120 else ''}")
-    print(f"Expected contradiction: {example['has_contradiction']}")
-    print()
-
-    t0 = time.perf_counter()
-    contradictions, meta = router.route(
-        context=example["context"],
-        response=example["response"],
+def _make_contradiction(severity: Severity, method: DetectionMethod, confidence: float = 0.9) -> Contradiction:
+    """Factory helper to build a minimal Contradiction for testing."""
+    return Contradiction(
+        response_span="span",
+        context_span="span",
+        explanation="test",
+        severity=severity,
+        method=method,
+        confidence=confidence,
     )
-    elapsed_ms = (time.perf_counter() - t0) * 1000
-
-    report = agg.aggregate(contradictions, meta, elapsed_ms)
-
-    print(f"Faithfulness score : {report.faithfulness_score:.4f}")
-    print(f"Method used        : {report.method_used.value}")
-    print(f"NLI pairs checked  : {report.nli_pairs_checked}")
-    print(f"LLM escalations    : {report.llm_escalations}")
-    print(f"Processing time    : {report.processing_time_ms:.1f}ms")
-    print(f"Contradictions     : {len(report.contradictions)}")
-
-    for c in report.contradictions:
-        print(f"  [{c.method.value:8}] [{c.severity.value:9}] conf={c.confidence:.2f}")
-        print(f"    Response span: {c.response_span!r}")
-        print(f"    Context span:  {c.context_span!r}")
-        print(f"    Explanation:   {c.explanation}")
-
-    passed = bool(report.contradictions) == example["has_contradiction"]
-    print()
-    print(f"Result: {'PASS' if passed else 'FAIL'}")
-    return passed
 
 
-def main() -> None:
-    """Load the pipeline once, then run all examples from data/examples.json."""
-    examples = load_examples()
-    print(f"Loaded {len(examples)} examples from {_EXAMPLES_PATH}")
-    print("Initialising router and aggregator...")
-    router = Router()
-    agg = Aggregator()
-    print("Ready.\n")
-
-    results = [run_case(router, agg, ex) for ex in examples]
-
-    passed = sum(results)
-    total = len(results)
-    print(f"\n{'='*60}")
-    print(f"Done. {passed}/{total} passed.")
+def test_perfect_score_with_no_contradictions(aggregator):
+    """Empty contradiction list yields a faithfulness score of 1.0."""
+    report = aggregator.aggregate([], {"nli_pairs_checked": 5, "nli_caught": 0, "llm_escalated": 0, "llm_caught": 0}, 100.0)
+    assert report.faithfulness_score == 1.0
 
 
-if __name__ == "__main__":
-    main()
+def test_direct_contradiction_reduces_score(aggregator):
+    """A DIRECT contradiction (penalty=0.30) lowers the score below 0.75."""
+    c = _make_contradiction(Severity.DIRECT, DetectionMethod.NLI)
+    report = aggregator.aggregate([c], {"nli_pairs_checked": 3, "nli_caught": 1, "llm_escalated": 0, "llm_caught": 0}, 50.0)
+    assert report.faithfulness_score == pytest.approx(0.70, abs=0.01)
+
+
+def test_score_never_goes_below_zero(aggregator):
+    """Multiple severe contradictions floor at 0.0, never negative."""
+    contradictions = [_make_contradiction(Severity.DIRECT, DetectionMethod.LLM) for _ in range(10)]
+    report = aggregator.aggregate(contradictions, {"nli_pairs_checked": 0, "nli_caught": 0, "llm_escalated": 1, "llm_caught": 10}, 200.0)
+    assert report.faithfulness_score >= 0.0
+
+
+def test_method_inferred_as_ensemble_when_both_ran(aggregator):
+    """Method is ENSEMBLE when both NLI and LLM contributed contradictions."""
+    nli_c = _make_contradiction(Severity.PARTIAL, DetectionMethod.NLI)
+    llm_c = _make_contradiction(Severity.MULTIHOP, DetectionMethod.LLM)
+    report = aggregator.aggregate(
+        [nli_c, llm_c],
+        {"nli_pairs_checked": 4, "nli_caught": 1, "llm_escalated": 1, "llm_caught": 1},
+        150.0,
+    )
+    assert report.method_used == DetectionMethod.ENSEMBLE
+
+
+def test_processing_time_is_recorded(aggregator):
+    """processing_time_ms is stored in the report."""
+    report = aggregator.aggregate([], {"nli_pairs_checked": 2, "nli_caught": 0, "llm_escalated": 0, "llm_caught": 0}, 123.4)
+    assert report.processing_time_ms == pytest.approx(123.4)

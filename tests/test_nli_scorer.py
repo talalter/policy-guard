@@ -1,77 +1,49 @@
-"""Manual test script for NLI scorer.
+"""Integration tests for NLIScorer.
 
-Loads examples from data/examples.json and runs each through the NLI scorer.
-
-Run from the backend/ directory:
-    python test_nli_scorer.py
-
-To add examples, edit data/examples.json — do not add them here.
+Requires local model weights (~1.5 GB, cached after first download).
+Run with: pytest -m integration
 """
 
-import json
-import logging
-import pathlib
+import pytest
 
-from backend.core import NLIScorer
-
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-
-_EXAMPLES_PATH = pathlib.Path(__file__).parent.parent / "data" / "examples.json"
+pytestmark = pytest.mark.integration
 
 
-def load_examples() -> list[dict]:
-    """Load labeled examples from the shared data file."""
-    with _EXAMPLES_PATH.open() as f:
-        return json.load(f)
+def test_flags_direct_numerical_contradiction(nli_scorer):
+    """A clear numeric mismatch is flagged at high confidence."""
+    context = "The API rate limit is 100 requests per minute."
+    response = "The API rate limit is 1000 requests per minute."
+    results = list(nli_scorer.score(context, response))
+    contradictions = [r for r in results if r.label == "contradiction" and r.confidence >= 0.75]
+    assert contradictions, "Expected NLI to flag a 10× rate limit discrepancy"
 
 
-def run_case(scorer: NLIScorer, example: dict) -> bool:
-    """Run a single example and print results. Returns True if PASS."""
-    print(f"\n{'='*60}")
-    print(f"CASE [{example['id']}]: {example['contradiction_type'].upper()} — {example.get('notes', '')}")
-    print(f"{'='*60}")
-    print(f"Context:  {example['context'][:120]}{'...' if len(example['context']) > 120 else ''}")
-    print(f"Response: {example['response'][:120]}{'...' if len(example['response']) > 120 else ''}")
-    print(f"Expected contradiction: {example['has_contradiction']}")
-    print()
-
-    results = []
-    print("Streaming results (highest similarity first):")
-    for r in scorer.score(example["context"], example["response"]):
-        results.append(r)
-        marker = ">>>" if r.label == "contradiction" else "   "
-        print(f"  {marker} [{r.label:15}] conf={r.confidence:.2f}  contra={r.contradiction_score:.2f}")
-        print(f"        P: {r.pair.premise}")
-        print(f"        H: {r.pair.hypothesis}")
-
-    contradictions = [r for r in results if r.label == "contradiction"]
-    print()
-    print(f"Total pairs scored: {len(results)}")
-    print(f"Contradictions found: {len(contradictions)}")
-    for c in contradictions:
-        print(f"  - conf={c.confidence:.2f} | {c.pair.premise!r} vs {c.pair.hypothesis!r}")
-
-    passed = bool(contradictions) == example["has_contradiction"]
-    print()
-    print(f"Result: {'PASS' if passed else 'FAIL'}")
-    return passed
+def test_passes_faithful_paraphrase(nli_scorer):
+    """A faithful paraphrase is not flagged as a contradiction."""
+    context = "Authentication uses OAuth 2.0 bearer tokens."
+    response = "The API authenticates requests with OAuth 2.0 bearer tokens."
+    results = list(nli_scorer.score(context, response))
+    contradictions = [r for r in results if r.label == "contradiction" and r.confidence >= 0.75]
+    assert not contradictions, f"Faithful paraphrase was incorrectly flagged: {contradictions}"
 
 
-def main() -> None:
-    """Load the scorer once, then run all examples from data/examples.json."""
-    examples = load_examples()
-    print(f"Loaded {len(examples)} examples from {_EXAMPLES_PATH}")
-    print("Loading NLI model (first run downloads ~1.5 GB, cached after that)...")
-    scorer = NLIScorer()
-    print("Model ready.\n")
-
-    results = [run_case(scorer, ex) for ex in examples]
-
-    passed = sum(results)
-    total = len(results)
-    print(f"\n{'='*60}")
-    print(f"Done. {passed}/{total} passed.")
+def test_streams_results(nli_scorer):
+    """score() returns an iterator, not a list."""
+    context = "The timeout is 30 seconds."
+    response = "The timeout is 60 seconds."
+    stream = nli_scorer.score(context, response)
+    assert hasattr(stream, "__iter__"), "score() must return an iterable"
+    results = list(stream)
+    assert len(results) > 0, "Expected at least one scored pair"
 
 
-if __name__ == "__main__":
-    main()
+def test_benchmark_accuracy(nli_scorer, examples):
+    """NLI achieves at least 70% accuracy on the RAGTruth benchmark sample."""
+    correct = 0
+    for ex in examples:
+        results = list(nli_scorer.score(ex["context"], ex["response"]))
+        found = any(r.label == "contradiction" and r.confidence >= 0.75 for r in results)
+        if found == ex["has_contradiction"]:
+            correct += 1
+    accuracy = correct / len(examples)
+    assert accuracy >= 0.70, f"NLI accuracy {accuracy:.1%} is below the 70% floor on {len(examples)} examples"

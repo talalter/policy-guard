@@ -66,7 +66,7 @@ def _infer_method(
         # No contradictions found; infer from whether LLM was ever invoked.
         return (
             DetectionMethod.ENSEMBLE
-            if metadata.get("llm_escalated", 0) > 0
+            if metadata.get("llm_called", False)
             else DetectionMethod.NLI
         )
 
@@ -75,9 +75,9 @@ def _infer_method(
     if len(methods_used) > 1:
         return DetectionMethod.ENSEMBLE
     sole_method = next(iter(methods_used))
-    # Even if all *caught* contradictions came from one method, if the other
-    # method ran and escalated pairs it still counts as an ensemble run.
-    if sole_method == DetectionMethod.NLI and metadata.get("llm_escalated", 0) > 0:
+    # Even if all caught contradictions came from one method, if the LLM ran
+    # it counts as an ensemble run.
+    if sole_method == DetectionMethod.NLI and metadata.get("llm_called", False):
         return DetectionMethod.ENSEMBLE
     return sole_method
 
