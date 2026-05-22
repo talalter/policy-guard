@@ -2,16 +2,16 @@
 
 Loads labeled examples from data/examples.json, runs all three methods on each,
 computes Precision / Recall / F1, measures wall-clock latency, estimates
-GPT-4o cost, and writes results to data/benchmark_results.json.
+GPT-5.4-mini cost, and writes results to data/benchmark_results.json.
 
 Prediction rule:
     An example is considered a *positive* prediction if the pipeline returns
     at least one Contradiction object (len(contradictions) > 0).
 
-Cost model (OpenAI pricing, early 2026):
-    Input:  $2.50 / 1M tokens
-    Output: $10.00 / 1M tokens
-    Token approximation: len(text) // 4  (4 chars ≈ 1 token, OpenAI convention)
+Cost model (gpt-5.4-mini standard pricing, 2026):
+    Token counts: read from resp.usage after every API call.
+    Multi-turn cost: summed across all tool-loop iterations (each request charges for
+    the full growing conversation, so simple summing gives the true billed amount).
     NLI runs locally — always $0.00.
 
 Usage:
@@ -26,33 +26,43 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from tqdm import tqdm
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from backend.config import settings  # noqa: E402
-from backend.core import LLMJudge, NLIScorer, Router  # noqa: E402
+from backend.core import BaseLLMJudge, NLIScorer, Router  # noqa: E402
+from backend.core.router import nli_to_contradiction  # noqa: E402
 from backend.models import BenchmarkResult, DetectionMethod  # noqa: E402
+from backend.utils.dedup import deduplicate  # noqa: E402
 
-logging.basicConfig(
-    level=settings.log_level.upper(),
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    force=True,
-)
+class _TqdmHandler(logging.StreamHandler):
+    """Routes log records through tqdm.write() so they don't break progress bars."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            tqdm.write(self.format(record))
+        except Exception:
+            self.handleError(record)
+
+
+_handler = _TqdmHandler()
+_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+logging.root.setLevel(settings.log_level.upper())
+logging.root.handlers = [_handler]
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("openai._base_client").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 _DATA_DIR = Path(__file__).parent.parent.parent / "data"
-_EXAMPLES_PATH = _DATA_DIR / "ragtruth_sample.json"
-_RESULTS_PATH = _DATA_DIR / "benchmark_results_ragtruth_sample_llm_only.json"
+_EXAMPLES_PATH = _DATA_DIR / "agent_action_policy_benchmark_v1.json"
+_RESULTS_PATH = _DATA_DIR / "benchmark_results_agent_action_policy_benchmark_v1_1.json"
 
-# OpenAI pricing as of early 2026: $2.50/1M input tokens, $10.00/1M output tokens
-_INPUT_COST_PER_TOKEN: float = 2.50 / 1_000_000
-_OUTPUT_COST_PER_TOKEN: float = 10.00 / 1_000_000
-
-# Approximate fixed overhead: system prompt + template structure
-_SYSTEM_PROMPT_TOKENS = 120
-_OUTPUT_TOKENS_ESTIMATE = 300
+# gpt-5.4-mini standard pricing: $0.75/1M input tokens, $4.50/1M output tokens
+# (Batch API is half this; benchmark uses real-time calls so standard rates apply.)
+_INPUT_COST_PER_TOKEN: float = 0.75 / 1_000_000
+_OUTPUT_COST_PER_TOKEN: float = 4.50 / 1_000_000
 
 
 @dataclass
@@ -65,12 +75,55 @@ class _MethodRun:
     costs: list[float]
 
 
+_POLICY_LABEL_TO_BOOL: dict[str, bool] = {"FAIL": True, "PARTIAL": True, "PASS": False}
+
+
+def _flatten_policy_benchmark(data: dict) -> tuple[list[dict], int]:
+    """Flatten the nested policy-benchmark format into a flat list of examples.
+
+    Label mapping:
+        FAIL / PARTIAL  → has_contradiction=True
+        PASS            → has_contradiction=False
+        UNCERTAIN       → excluded (ground truth genuinely unknown)
+
+    Returns (examples, uncertain_count).
+    """
+    flat: list[dict] = []
+    uncertain = 0
+    for policy in data["policies"]:
+        for ex in policy["examples"]:
+            if ex["label"] == "UNCERTAIN":
+                uncertain += 1
+                continue
+            flat.append({
+                "context": policy["policy_text"],
+                "response": ex["response"],
+                "has_contradiction": _POLICY_LABEL_TO_BOOL[ex["label"]],
+                "contradiction_type": ex.get("primary_reasoning_type", "unknown"),
+                "difficulty": ex.get("difficulty", "unknown"),
+                "label": ex["label"],
+                "policy_id": policy["policy_id"],
+                "example_id": ex["example_id"],
+            })
+    return flat, uncertain
+
+
 def _load_examples(path: Path) -> list[dict]:
-    """Load labeled examples from the JSON file at path."""
+    """Load labeled examples from JSON; auto-detects the nested policy benchmark format."""
     with open(path) as f:
-        examples = json.load(f)
-    logger.info("Loaded %d examples from %s", len(examples), path)
-    return examples
+        raw = json.load(f)
+
+    if isinstance(raw, dict) and "policies" in raw:
+        examples, uncertain_count = _flatten_policy_benchmark(raw)
+        logger.info(
+            "Loaded %d examples from %s (policy benchmark; %d UNCERTAIN excluded)",
+            len(examples), path, uncertain_count,
+        )
+    else:
+        examples = raw
+        logger.info("Loaded %d examples from %s", len(examples), path)
+
+    return examples # type: ignore
 
 
 def _count_tokens(text: str) -> int:
@@ -78,14 +131,12 @@ def _count_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
-def _estimate_llm_cost(context: str, response: str) -> float:
-    """Estimate GPT-4o cost for a single context+response call."""
-    input_tokens = (
-        _SYSTEM_PROMPT_TOKENS + _count_tokens(context) + _count_tokens(response)
-    )
+def _actual_llm_cost(judge: "BaseLLMJudge") -> float:
+    """Compute exact cost from token counts returned by the provider API."""
+    usage = judge.get_last_usage()
     return (
-        input_tokens * _INPUT_COST_PER_TOKEN
-        + _OUTPUT_TOKENS_ESTIMATE * _OUTPUT_COST_PER_TOKEN
+        usage["input_tokens"] * _INPUT_COST_PER_TOKEN
+        + usage["output_tokens"] * _OUTPUT_COST_PER_TOKEN
     )
 
 
@@ -161,30 +212,39 @@ def _compute_bootstrap_ci(
     return round(f1_scores[low], 4), round(f1_scores[high], 4)
 
 
-def _compute_per_severity(
+def _compute_per_group(
     examples: list[dict],
     predictions: list[bool],
+    key: str,
 ) -> dict[str, dict[str, float]]:
-    """Compute precision, recall, F1 broken down by contradiction_type.
+    """Compute precision, recall, F1 broken down by an arbitrary example field.
 
-    Reveals where each method struggles — e.g. NLI handles direct contradictions
-    well but misses multi-hop ones that require full-document reasoning.
+    Used for both contradiction_type (legacy) and primary_reasoning_type / difficulty
+    (policy benchmark format).
     """
     from collections import defaultdict
     groups: dict[str, list[tuple[bool, bool]]] = defaultdict(list)
     for ex, pred in zip(examples, predictions):
-        severity = ex.get("contradiction_type") or "none"
-        groups[severity].append((ex["has_contradiction"], pred))
+        group = ex.get(key) or "none"
+        groups[group].append((ex["has_contradiction"], pred))
 
     result = {}
-    for severity, pairs in groups.items():
-        if severity == "none":
+    for group, pairs in groups.items():
+        if group == "none":
             continue
         gt = [g for g, _ in pairs]
         preds = [p for _, p in pairs]
         precision, recall, f1 = _compute_metrics(gt, preds)
-        result[severity] = {"precision": precision, "recall": recall, "f1": f1}
+        result[group] = {"precision": precision, "recall": recall, "f1": f1}
     return result
+
+
+def _compute_per_difficulty(
+    examples: list[dict],
+    predictions: list[bool],
+) -> dict[str, dict[str, float]]:
+    """Compute precision, recall, F1 broken down by difficulty (easy / medium / hard)."""
+    return _compute_per_group(examples, predictions, "difficulty")
 
 
 def _run_nli_only(
@@ -193,44 +253,52 @@ def _run_nli_only(
 ) -> _MethodRun:
     """Run NLI-only detection on every example; NLI escalation cost is always $0."""
     predictions, scores, latencies_ms, costs = [], [], [], []
-    for example in examples:
+    for example in tqdm(examples, desc="NLI only", unit="ex"):
         t_start = time.perf_counter()
-        # Materialize once so we can safely compute multiple metrics.
         results = list(scorer.score(example["context"], example["response"]))
         latencies_ms.append((time.perf_counter() - t_start) * 1000)
-        predictions.append(any(r.label == "contradiction" for r in results))
-        scores.append(max((r.contradiction_score for r in results), default=0.0))
+        # Apply the same confidence gate and deduplication the router uses so the
+        # NLI-only metric is computed on the same basis as the ensemble path.
+        contradictions = deduplicate([
+            nli_to_contradiction(r)
+            for r in results
+            if r.label == "contradiction" and r.confidence >= settings.nli_confidence_threshold
+        ])
+        predictions.append(len(contradictions) > 0)
+        scores.append(max((c.confidence for c in contradictions), default=0.0))
         costs.append(0.0)
     return _MethodRun(predictions=predictions, scores=scores, latencies_ms=latencies_ms, costs=costs)
 
 
 def _run_llm_only(
     examples: list[dict],
-    judge: LLMJudge,
+    judge: BaseLLMJudge,
 ) -> _MethodRun:
     """Run LLM-only detection (no NLI pre-filter) on every example."""
     predictions, scores, latencies_ms, costs = [], [], [], []
-    for example in examples:
+    for example in tqdm(examples, desc="LLM only", unit="ex"):
         t_start = time.perf_counter()
         contradictions = judge.judge(
             context=example["context"],
             response=example["response"],
+            candidate_pairs=[],
             uncertain_pairs=[],
         )
         latencies_ms.append((time.perf_counter() - t_start) * 1000)
         predictions.append(len(contradictions) > 0)
         scores.append(max((c.confidence for c in contradictions), default=0.0))
-        costs.append(_estimate_llm_cost(example["context"], example["response"]))
+        costs.append(_actual_llm_cost(judge))
     return _MethodRun(predictions=predictions, scores=scores, latencies_ms=latencies_ms, costs=costs)
 
 
 def _run_ensemble(
     examples: list[dict],
     router: Router,
+    judge: BaseLLMJudge,
 ) -> _MethodRun:
     """Run ensemble detection (NLI + conditional LLM escalation) on every example."""
     predictions, scores, latencies_ms, costs = [], [], [], []
-    for example in examples:
+    for example in tqdm(examples, desc="Ensemble", unit="ex"):
         t_start = time.perf_counter()
         contradictions, metadata = router.route(example["context"], example["response"])
         latencies_ms.append((time.perf_counter() - t_start) * 1000)
@@ -238,7 +306,7 @@ def _run_ensemble(
         scores.append(max((c.confidence for c in contradictions), default=0.0))
         # Cost is $0 when NLI resolved it without LLM escalation.
         if metadata.get("llm_escalated", 0) > 0:
-            costs.append(_estimate_llm_cost(example["context"], example["response"]))
+            costs.append(_actual_llm_cost(judge))
         else:
             costs.append(0.0)
     return _MethodRun(predictions=predictions, scores=scores, latencies_ms=latencies_ms, costs=costs)
@@ -255,7 +323,7 @@ def _build_result(
     f1_ci_low, f1_ci_high = _compute_bootstrap_ci(ground_truth, run.predictions)
     fpr = _compute_fpr(ground_truth, run.predictions)
     auc_roc = _compute_auc_roc(ground_truth, run.scores)
-    per_severity = _compute_per_severity(examples, run.predictions)
+    per_difficulty = _compute_per_difficulty(examples, run.predictions)
     avg_latency = sum(run.latencies_ms) / len(run.latencies_ms)
     avg_cost = sum(run.costs) / len(run.costs)
     return BenchmarkResult(
@@ -267,17 +335,17 @@ def _build_result(
         f1_ci_high=f1_ci_high,
         fpr=fpr,
         auc_roc=auc_roc,
-        per_severity=per_severity,
+        per_difficulty=per_difficulty,
         avg_latency_ms=round(avg_latency, 1),
         estimated_cost_per_call=round(avg_cost, 6),
     )
 
 
-def _print_table(results: list[BenchmarkResult]) -> None:
+def _print_table(results: list[BenchmarkResult], examples: list[dict]) -> None:
     """Print benchmark results: main metrics table + per-severity breakdown."""
     labels = {
         DetectionMethod.NLI: "NLI only",
-        DetectionMethod.LLM: "GPT-4o only",
+        DetectionMethod.LLM: f"{settings.gpt_model} only",
         DetectionMethod.ENSEMBLE: "Ensemble",
     }
 
@@ -306,30 +374,26 @@ def _print_table(results: list[BenchmarkResult]) -> None:
             f"  ${r.estimated_cost_per_call:>{col[8] - 3}.4f}"
         )
 
-    # Per-severity breakdown
-    severity_order = ["direct", "partial", "multi-hop"]
-    all_severities = sorted(
-        {s for r in results for s in r.per_severity},
-        key=lambda s: severity_order.index(s) if s in severity_order else 99,
-    )
-    if not all_severities:
-        return
+    # Per-difficulty breakdown
+    difficulty_order = ["easy", "medium", "hard"]
+    all_difficulties = [d for d in difficulty_order if any(d in r.per_difficulty for r in results)]
+    if all_difficulties:
+        from collections import Counter
+        diff_counts = Counter(ex.get("difficulty", "unknown") for ex in examples)
+        print("\nPer-difficulty F1:")
+        col_w = 10
+        diff_header = f"{'Method':<14}" + "".join(f"{d:>{col_w}}" for d in all_difficulties)
+        note = "  (" + " · ".join(f"n={diff_counts.get(d, 0)} {d}" for d in all_difficulties) + ")"
+        print(diff_header + note)
+        print("-" * (14 + col_w * len(all_difficulties)))
+        for r in results:
+            name = labels.get(r.method, r.method.value)
+            row = f"{name:<14}"
+            for d in all_difficulties:
+                f1 = r.per_difficulty.get(d, {}).get("f1", float("nan"))
+                row += f"{f1:>{col_w}.2f}" if not (f1 != f1) else f"{'N/A':>{col_w}}"
+            print(row)
 
-    print("\nPer-severity F1:")
-    sev_col = (14, 10, 10, 10)
-    sev_header = (
-        f"{'Method':<{sev_col[0]}}"
-        + "".join(f"{s:>{sev_col[1]}}" for s in all_severities)
-    )
-    print(sev_header)
-    print("-" * (sev_col[0] + sev_col[1] * len(all_severities)))
-    for r in results:
-        name = labels.get(r.method, r.method.value)
-        row = f"{name:<{sev_col[0]}}"
-        for s in all_severities:
-            f1 = r.per_severity.get(s, {}).get("f1", float("nan"))
-            row += f"{f1:>{sev_col[1]}.2f}" if not (f1 != f1) else f"{'—':>{sev_col[1]}}"
-        print(row)
 
 
 def _save_results(results: list[BenchmarkResult], path: Path) -> None:
@@ -351,7 +415,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        default=None,
+        default=_RESULTS_PATH,
         help="Path to write results JSON (default: data/benchmark_results.json or "
              "data/benchmark_results_<stem>.json for non-default datasets)",
     )
@@ -379,23 +443,23 @@ def main() -> None:
     ground_truth = [ex["has_contradiction"] for ex in examples]
     print(f"Running benchmark on {len(examples)} examples from {dataset_path.name}...\n")
 
-    print("  [1/3] NLI only  (local, free)...")
     nli_run = _run_nli_only(examples, scorer)
-    print("  [2/3] LLM only  (GPT-4o, all examples)...")
     llm_run = _run_llm_only(examples, judge)
+    ensemble_run = _run_ensemble(examples, router, judge)
 
-    print("  [3/3] Ensemble  (NLI + conditional GPT-4o)...")
-    ensemble_run = _run_ensemble(examples, router)
-
+    method_runs = [
+        (DetectionMethod.NLI, nli_run),
+        (DetectionMethod.LLM, llm_run),
+        (DetectionMethod.ENSEMBLE, ensemble_run),
+    ]
     results = [
-        _build_result(DetectionMethod.NLI, nli_run, ground_truth, examples),  # type: ignore
-        _build_result(DetectionMethod.LLM, llm_run, ground_truth, examples),  # type: ignore
-        _build_result(DetectionMethod.ENSEMBLE, ensemble_run, ground_truth, examples),  # type: ignore
+        _build_result(method, run, ground_truth, examples)
+        for method, run in method_runs
     ]
 
     print()
     _save_results(results, results_path)
-    _print_table(results)
+    _print_table(results, examples)
     print(f"\nResults written to {results_path}")
 
 

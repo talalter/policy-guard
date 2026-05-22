@@ -3,7 +3,7 @@
 Loads wandb/RAGTruth-processed from HuggingFace, filters to Summary and QA
 task types (natural-language context), samples 50 contradiction examples and
 50 faithful examples, and saves to data/ragtruth_sample.json in the same
-schema as examples.json.
+schema as the benchmark datasets.
 
 Contradiction mapping:
     evident_conflict > 0  →  has_contradiction=True, contradiction_type="direct"
@@ -11,7 +11,7 @@ Contradiction mapping:
     both zero             →  has_contradiction=False, contradiction_type="none"
 
 Usage:
-    python data/prepare_ragtruth.py
+    python scripts/prepare_ragtruth.py
 """
 
 import json
@@ -27,26 +27,24 @@ N_PER_CLASS = 50
 MAX_CONTEXT_CHARS = 1500   # keep examples short enough for fast NLI inference
 MAX_RESPONSE_CHARS = 800
 VALID_TASK_TYPES = {"Summary", "QA"}
-OUT_PATH = Path(__file__).parent / "ragtruth_sample.json"
+OUT_PATH = Path(__file__).parent.parent / "data" / "ragtruth_sample.json"
 
 
 def _to_example(row: dict, idx: int, has_contradiction: bool) -> dict:
-    contradiction_type = "direct" if has_contradiction else "none"
-    notes = (
-        f"RAGTruth {row['task_type']} example — model: {row['model']}"
-    )
+    """Convert a RAGTruth row into the shared example schema."""
     return {
         "id": f"ragt_{idx:03d}",
         "source": "ragtruth",
         "context": row["context"][:MAX_CONTEXT_CHARS],
         "response": row["output"][:MAX_RESPONSE_CHARS],
         "has_contradiction": has_contradiction,
-        "contradiction_type": contradiction_type,
-        "notes": notes,
+        "contradiction_type": "direct" if has_contradiction else "none",
+        "notes": f"RAGTruth {row['task_type']} example — model: {row['model']}",
     }
 
 
 def main() -> None:
+    """Download RAGTruth, sample balanced examples, and save to data/."""
     from datasets import load_dataset
 
     logger.info("Loading wandb/RAGTruth-processed from HuggingFace...")
@@ -54,7 +52,6 @@ def main() -> None:
     logger.info("Loaded %d total examples", len(ds))
 
     positives, negatives = [], []
-
     for _row in ds:
         row: dict = dict(_row)
         if row["task_type"] not in VALID_TASK_TYPES:
@@ -63,32 +60,22 @@ def main() -> None:
             continue
         if row.get("quality") != "good":
             continue
-
         processed = row["hallucination_labels_processed"]
-        evident_conflict = processed.get("evident_conflict", 0)
-        baseless_info = processed.get("baseless_info", 0)
-
-        if evident_conflict > 0:
+        if processed.get("evident_conflict", 0) > 0:
             positives.append(row)
-        elif baseless_info == 0:
-            # Completely faithful — no hallucination at all
+        elif processed.get("baseless_info", 0) == 0:
             negatives.append(row)
-        # else: fabrication-only — skip
 
-    logger.info(
-        "Found %d contradiction examples, %d faithful examples",
-        len(positives), len(negatives),
-    )
+    logger.info("Found %d contradiction examples, %d faithful examples", len(positives), len(negatives))
 
     random.seed(SEED)
     sampled_pos = random.sample(positives, min(N_PER_CLASS, len(positives)))
     sampled_neg = random.sample(negatives, min(N_PER_CLASS, len(negatives)))
 
-    examples = []
-    for i, row in enumerate(sampled_pos):
-        examples.append(_to_example(row, i + 1, has_contradiction=True))
-    for i, row in enumerate(sampled_neg):
-        examples.append(_to_example(row, i + 1 + len(sampled_pos), has_contradiction=False))
+    examples = (
+        [_to_example(row, i + 1, has_contradiction=True) for i, row in enumerate(sampled_pos)]
+        + [_to_example(row, i + 1 + len(sampled_pos), has_contradiction=False) for i, row in enumerate(sampled_neg)]
+    )
 
     with open(OUT_PATH, "w") as f:
         json.dump(examples, f, indent=2)

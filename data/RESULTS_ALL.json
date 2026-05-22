@@ -1,0 +1,89 @@
+[
+  {
+    "method": "nli",
+    "precision": 0.4545,
+    "recall": 0.625,
+    "f1": 0.5263,
+    "f1_ci_low": 0.3881,
+    "f1_ci_high": 0.6585,
+    "fpr": 0.75,
+    "auc_roc": 0.458,
+    "per_difficulty": {
+      "easy": {
+        "precision": 0.5714,
+        "recall": 0.8,
+        "f1": 0.6667
+      },
+      "medium": {
+        "precision": 0.3571,
+        "recall": 0.4167,
+        "f1": 0.3846
+      },
+      "hard": {
+        "precision": 0.4375,
+        "recall": 0.7,
+        "f1": 0.5385
+      }
+    },
+    "avg_latency_ms": 2529.5,
+    "estimated_cost_per_call": 0.0
+  },
+  {
+    "method": "llm",
+    "precision": 0.9412,
+    "recall": 1.0,
+    "f1": 0.9697,
+    "f1_ci_low": 0.9153,
+    "f1_ci_high": 1.0,
+    "fpr": 0.0625,
+    "auc_roc": 0.9951,
+    "per_difficulty": {
+      "easy": {
+        "precision": 0.9091,
+        "recall": 1.0,
+        "f1": 0.9524
+      },
+      "medium": {
+        "precision": 0.9231,
+        "recall": 1.0,
+        "f1": 0.96
+      },
+      "hard": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      }
+    },
+    "avg_latency_ms": 4359.0,
+    "estimated_cost_per_call": 0.007012
+  },
+  {
+    "method": "ensemble",
+    "precision": 0.8065,
+    "recall": 0.7812,
+    "f1": 0.7937,
+    "f1_ci_low": 0.6667,
+    "f1_ci_high": 0.8923,
+    "fpr": 0.1875,
+    "auc_roc": 0.8413,
+    "per_difficulty": {
+      "easy": {
+        "precision": 0.9,
+        "recall": 0.9,
+        "f1": 0.9
+      },
+      "medium": {
+        "precision": 0.7778,
+        "recall": 0.5833,
+        "f1": 0.6667
+      },
+      "hard": {
+        "precision": 0.75,
+        "recall": 0.9,
+        "f1": 0.8182
+      }
+    },
+    "avg_latency_ms": 7184.6,
+    "estimated_cost_per_call": 0.004013
+  }
+]
