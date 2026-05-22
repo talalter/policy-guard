@@ -1,80 +1,50 @@
-"""Manual test script for LLM judge.
+"""Integration tests for LLM judge providers.
 
-Loads examples from data/examples.json and runs each through the LLM judge.
-Requires OPENAI_API_KEY to be set in the environment or a .env file in the
-project root.
-
-Run from the backend/ directory:
-    python test_llm_judge.py
-
-To add examples, edit data/examples.json — do not add them here.
+Requires a valid API key (OPENAI_API_KEY or ANTHROPIC_API_KEY depending on
+LLM_PROVIDER setting).
+Run with: pytest -m integration
 """
 
-import json
-import logging
-import pathlib
+import pytest
 
-from dotenv import load_dotenv
-
-load_dotenv(pathlib.Path(__file__).parent.parent / ".env")
-
-from backend.core import LLMJudge
-
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-
-_EXAMPLES_PATH = pathlib.Path(__file__).parent.parent / "data" / "examples.json"
+pytestmark = pytest.mark.integration
 
 
-def load_examples() -> list[dict]:
-    """Load labeled examples from the shared data file."""
-    with _EXAMPLES_PATH.open() as f:
-        return json.load(f)
+def test_flags_direct_contradiction(llm_judge):
+    """Judge flags an explicit factual contradiction with high confidence."""
+    context = "The maximum payload size for the API is 10 MB."
+    response = "You can send payloads up to 100 MB to the API."
+    contradictions = llm_judge.judge(context=context, response=response, candidate_pairs=[], uncertain_pairs=[])
+    assert contradictions, "Expected LLM judge to flag a 10× payload size discrepancy"
+    assert contradictions[0].confidence >= 0.85
 
 
-def run_case(judge: LLMJudge, example: dict) -> bool:
-    """Run a single example and print results. Returns True if PASS."""
-    print(f"\n{'='*60}")
-    print(f"CASE [{example['id']}]: {example['contradiction_type'].upper()} — {example.get('notes', '')}")
-    print(f"{'='*60}")
-    print(f"Context:  {example['context'][:120]}{'...' if len(example['context']) > 120 else ''}")
-    print(f"Response: {example['response'][:120]}{'...' if len(example['response']) > 120 else ''}")
-    print(f"Expected contradiction: {example['has_contradiction']}")
-    print()
-
-    contradictions = judge.judge(
-        context=example["context"],
-        response=example["response"],
-        uncertain_pairs=[],
-    )
-
-    print(f"Contradictions found: {len(contradictions)}")
-    for c in contradictions:
-        print(f"  [{c.severity.value:10}] conf={c.confidence:.2f}")
-        print(f"    Response span: {c.response_span!r}")
-        print(f"    Context span:  {c.context_span!r}")
-        print(f"    Explanation:   {c.explanation}")
-
-    passed = bool(contradictions) == example["has_contradiction"]
-    print()
-    print(f"Result: {'PASS' if passed else 'FAIL'}")
-    return passed
+def test_passes_faithful_summary(llm_judge):
+    """Judge does not flag a faithful summary as a contradiction."""
+    context = "Rate limiting is applied per API key. The default limit is 60 requests per minute."
+    response = "Each API key is subject to rate limiting, with a default of 60 requests per minute."
+    contradictions = llm_judge.judge(context=context, response=response, candidate_pairs=[], uncertain_pairs=[])
+    assert not contradictions, f"Faithful summary was incorrectly flagged: {contradictions}"
 
 
-def main() -> None:
-    """Load the judge once, then run all examples from data/examples.json."""
-    examples = load_examples()
-    print(f"Loaded {len(examples)} examples from {_EXAMPLES_PATH}")
-    print("Initialising LLM judge...")
-    judge = LLMJudge()
-    print("Ready.\n")
-
-    results = [run_case(judge, ex) for ex in examples]
-
-    passed = sum(results)
-    total = len(results)
-    print(f"\n{'='*60}")
-    print(f"Done. {passed}/{total} passed.")
+def test_drops_paraphrase_findings(llm_judge):
+    """Judge drops findings it classifies as paraphrases via is_paraphrase_or_equivalent."""
+    context = "Responses are returned in descending order by creation date."
+    response = "Results are sorted newest first."
+    contradictions = llm_judge.judge(context=context, response=response, candidate_pairs=[], uncertain_pairs=[])
+    assert not contradictions, f"Synonym/paraphrase was flagged as a contradiction: {contradictions}"
 
 
-if __name__ == "__main__":
-    main()
+def test_benchmark_accuracy(llm_judge, examples):
+    """LLM judge achieves at least 75% accuracy on the RAGTruth benchmark sample."""
+    correct = 0
+    for ex in examples:
+        contradictions = llm_judge.judge(
+            context=ex["context"],
+            response=ex["response"],
+            candidate_pairs=[], uncertain_pairs=[],
+        )
+        if bool(contradictions) == ex["has_contradiction"]:
+            correct += 1
+    accuracy = correct / len(examples)
+    assert accuracy >= 0.75, f"LLM judge accuracy {accuracy:.1%} is below the 75% floor on {len(examples)} examples"
