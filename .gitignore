@@ -27,8 +27,6 @@ frontend/.vite/
 .cache/
 ~/.cache/huggingface/
 
-# Benchmark output (generated, not source)
-data/benchmark_results_*.json
 
 # IDE
 .vscode/
