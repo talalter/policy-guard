@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { fetchHistory, fetchStats, fetchHistoryItem, submitFeedback, deleteHistoryItem } from '../api/client'
 
 function scoreColor(score) {
@@ -21,7 +21,7 @@ function StatsBar({ stats }) {
       </span>
       <span className="stats-sep">·</span>
       <span className="stats-item">
-        <strong>{stats.total_contradictions}</strong> contradictions
+        <strong>{stats.total_violations}</strong> violations
       </span>
       <span className="stats-sep">·</span>
       <span className="stats-item">
@@ -31,55 +31,58 @@ function StatsBar({ stats }) {
   )
 }
 
-function ContradictionRow({ contradiction: c, index, runId }) {
+function ViolationRow({ violation: v, index, runId }) {
   const [verdict, setVerdict] = useState(null)
+  const submitted = useRef(false)
 
-  async function handleFeedback(v) {
-    if (verdict) return
-    setVerdict(v)
+  async function handleFeedback(val) {
+    if (submitted.current) return
+    submitted.current = true
+    setVerdict(val)
     try {
-      await submitFeedback(runId, index, v)
+      await submitFeedback(runId, index, val)
     } catch {
+      submitted.current = false
       setVerdict(null)
     }
   }
 
   return (
-    <li className="contradiction-item">
-      <div className="contradiction-badges">
-        <span className="badge" style={{ background: severityColor(c.severity) }}>
-          {c.severity}
+    <li className="violation-item">
+      <div className="violation-badges">
+        <span className="badge" style={{ background: severityColor(v.severity) }}>
+          {v.severity}
         </span>
         <span className="badge" style={{ background: 'var(--surface-2)', color: 'var(--text-muted)' }}>
-          {c.method}
+          {v.method}
         </span>
-        <span className="confidence">{Math.round(c.confidence * 100)}% confidence</span>
+        <span className="confidence">{Math.round(v.confidence * 100)}% confidence</span>
         <div className="feedback-buttons">
           <button
             className={`feedback-btn${verdict === 'confirmed' ? ' feedback-btn--active' : ''}`}
             onClick={() => handleFeedback('confirmed')}
             disabled={!!verdict}
-            title="Confirm — this is a real contradiction"
+            title="Confirm - this is a real violation"
           >✓</button>
           <button
             className={`feedback-btn feedback-btn--fp${verdict === 'false_positive' ? ' feedback-btn--active' : ''}`}
             onClick={() => handleFeedback('false_positive')}
             disabled={!!verdict}
-            title="False positive — not actually a contradiction"
+            title="False positive - not actually a violation"
           >✗</button>
         </div>
       </div>
-      <div className="contradiction-spans">
+      <div className="violation-spans">
         <div className="span-block span-block--response">
           <span className="span-label">Agent said</span>
-          <span className="span-text">{c.response_span}</span>
+          <span className="span-text">{v.response_span}</span>
         </div>
         <div className="span-block span-block--context">
           <span className="span-label">Policy says</span>
-          <span className="span-text">{c.context_span}</span>
+          <span className="span-text">{v.context_span}</span>
         </div>
       </div>
-      <p className="contradiction-explanation">{c.explanation}</p>
+      <p className="violation-explanation">{v.explanation}</p>
     </li>
   )
 }
@@ -121,8 +124,8 @@ function RunDetailModal({ runId, onClose }) {
           {detail && (
             <>
               <div className="modal-meta-row">
-                <span style={{ color: scoreColor(detail.faithfulness_score), fontWeight: 700, fontSize: 22 }}>
-                  {Math.round(detail.faithfulness_score * 100)}%
+                <span style={{ color: scoreColor(detail.compliance_score), fontWeight: 700, fontSize: 22 }}>
+                  {Math.round(detail.compliance_score * 100)}%
                 </span>
                 <span className="modal-badge">{detail.method_used.toUpperCase()}</span>
                 <span className="modal-badge">{detail.provider}</span>
@@ -143,16 +146,16 @@ function RunDetailModal({ runId, onClose }) {
 
               <div>
                 <p className="modal-section-label">
-                  Contradictions ({detail.contradictions.length})
+                  Violations ({detail.violations.length})
                 </p>
-                {detail.contradictions.length === 0 ? (
+                {detail.violations.length === 0 ? (
                   <p className="modal-no-violations">No violations detected</p>
                 ) : (
-                  <ul className="contradiction-list">
-                    {detail.contradictions.map((c, i) => (
-                      <ContradictionRow
+                  <ul className="violation-list">
+                    {detail.violations.map((v, i) => (
+                      <ViolationRow
                         key={i}
-                        contradiction={c}
+                        violation={v}
                         index={i}
                         runId={detail.run_id}
                       />
@@ -206,7 +209,7 @@ export default function HistoryTab() {
           fetchStats(),
         ])
         if (historyData.status === 'rejected') {
-          throw new Error(`History unavailable — is MONGODB_URL set?`)
+          throw new Error(`History unavailable - is MONGODB_URL set?`)
         }
         setHistory(historyData.value)
         if (statsData.status === 'fulfilled') setStats(statsData.value)
@@ -240,7 +243,7 @@ export default function HistoryTab() {
       {stats && <StatsBar stats={stats} />}
 
       {history.length === 0 ? (
-        <p className="history-empty">No runs yet — run a check to see history here.</p>
+        <p className="history-empty">No runs yet - run a check to see history here.</p>
       ) : (
         <>
           <p className="history-hint">Click any row to view full context and response.</p>
@@ -249,7 +252,7 @@ export default function HistoryTab() {
               <tr>
                 <th>Time</th>
                 <th>Score</th>
-                <th>Contradictions</th>
+                <th>Violations</th>
                 <th>Method</th>
                 <th>Provider</th>
                 <th>Context</th>
@@ -266,10 +269,10 @@ export default function HistoryTab() {
                   <td className="metric-cell" style={{ whiteSpace: 'nowrap' }}>
                     {new Date(item.timestamp).toLocaleString()}
                   </td>
-                  <td className="metric-cell" style={{ color: scoreColor(item.faithfulness_score) }}>
-                    {Math.round(item.faithfulness_score * 100)}%
+                  <td className="metric-cell" style={{ color: scoreColor(item.compliance_score) }}>
+                    {Math.round(item.compliance_score * 100)}%
                   </td>
-                  <td className="metric-cell">{item.contradiction_count}</td>
+                  <td className="metric-cell">{item.violation_count}</td>
                   <td>{item.method_used.toUpperCase()}</td>
                   <td>{item.provider}</td>
                   <td className="context-snippet">{item.context_snippet}</td>

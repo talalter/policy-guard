@@ -140,7 +140,7 @@ export default function BenchmarkTab() {
                   <td className="method-cell">{METHOD_LABELS[r.method] ?? r.method}</td>
                   {DIFFICULTY_ORDER.map(d => {
                     const f1 = r.per_difficulty?.[d]?.f1
-                    return <td key={d} className="metric-cell">{f1 != null ? (f1 * 100).toFixed(1) + '%' : '—'}</td>
+                    return <td key={d} className="metric-cell">{f1 != null ? (f1 * 100).toFixed(1) + '%' : '-'}</td>
                   })}
                 </tr>
               ))}

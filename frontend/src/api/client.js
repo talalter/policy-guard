@@ -1,5 +1,5 @@
 /**
- * API client — centralises all fetch calls so components stay presentation-only.
+ * API client - centralises all fetch calls so components stay presentation-only.
  *
  * Every function throws on non-2xx responses; callers handle errors in try/catch.
  */
@@ -44,10 +44,10 @@ export function checkLlmOnly(context, response) {
   })
 }
 
-export function submitFeedback(runId, contradictionIndex, verdict) {
+export function submitFeedback(runId, violationIndex, verdict) {
   return request(`/feedback/${runId}`, {
     method: 'POST',
-    body: JSON.stringify({ contradiction_index: contradictionIndex, verdict }),
+    body: JSON.stringify({ violation_index: violationIndex, verdict }),
   })
 }
 
