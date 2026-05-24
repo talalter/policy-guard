@@ -5,7 +5,7 @@ AI agents reasoning autonomously can violate your documented policies - even whe
 Paste a policy document (API spec, access rules, security runbook) and an agent's planned action. The system returns a compliance score, the exact violating spans, and the confidence level - in under a second for NLI-only, a few seconds for LLM-backed analysis.
 
 
-[Demo](docs/checker-demo.webm)
+![Demo](docs/checker-demo.gif)
 
 ---
 
