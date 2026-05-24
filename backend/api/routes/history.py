@@ -7,7 +7,7 @@ from bson.errors import InvalidId
 from fastapi import APIRouter, Depends, Header, HTTPException
 
 from backend.api.deps import get_db
-from backend.models import Contradiction, HistoryDetail, HistoryItem, StatsResponse
+from backend.models import Violation, HistoryDetail, HistoryItem, StatsResponse
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -20,10 +20,10 @@ async def get_history(
 ) -> list[HistoryItem]:
     """Return the 50 most recent detection runs for this session, newest first."""
     if db is None:
-        raise HTTPException(status_code=503, detail="Persistence not available — set MONGODB_URL")
+        raise HTTPException(status_code=503, detail="Persistence not available - set MONGODB_URL")
     projection = {
-        "context": 1, "faithfulness_score": 1, "method_used": 1,
-        "provider": 1, "contradictions": 1, "timestamp": 1,
+        "context": 1, "compliance_score": 1, "faithfulness_score": 1, "method_used": 1,
+        "provider": 1, "violations": 1, "timestamp": 1,
     }
     query = {"session_id": x_session_id} if x_session_id else {}
     cursor = db.detection_runs.find(query, projection).sort("timestamp", -1).limit(50)
@@ -32,8 +32,8 @@ async def get_history(
         items.append(HistoryItem(
             run_id=str(doc["_id"]),
             timestamp=doc["timestamp"].isoformat(),
-            faithfulness_score=doc["faithfulness_score"],
-            contradiction_count=len(doc.get("contradictions", [])),
+            compliance_score=doc.get("compliance_score", doc.get("faithfulness_score", 0.0)),
+            violation_count=len(doc.get("violations", [])),
             method_used=doc["method_used"],
             provider=doc["provider"],
             context_snippet=doc["context"][:100],
@@ -47,9 +47,9 @@ async def get_history_item(
     db=Depends(get_db),
     x_session_id: str | None = Header(default=None),
 ) -> HistoryDetail:
-    """Return full context, response, and contradictions for a single run."""
+    """Return full context, response, and violations for a single run."""
     if db is None:
-        raise HTTPException(status_code=503, detail="Persistence not available — set MONGODB_URL")
+        raise HTTPException(status_code=503, detail="Persistence not available - set MONGODB_URL")
     try:
         oid = ObjectId(run_id)
     except InvalidId:
@@ -61,12 +61,12 @@ async def get_history_item(
     return HistoryDetail(
         run_id=str(doc["_id"]),
         timestamp=doc["timestamp"].isoformat(),
-        faithfulness_score=doc["faithfulness_score"],
+        compliance_score=doc.get("compliance_score", doc.get("faithfulness_score", 0.0)),
         method_used=doc["method_used"],
         provider=doc["provider"],
         context=doc["context"],
         response=doc["response"],
-        contradictions=[Contradiction(**c) for c in doc.get("contradictions", [])],
+        violations=[Violation(**v) for v in doc.get("violations", [])],
     )
 
 
@@ -78,7 +78,7 @@ async def delete_history_item(
 ) -> None:
     """Delete a single detection run and its associated feedback by ID."""
     if db is None:
-        raise HTTPException(status_code=503, detail="Persistence not available — set MONGODB_URL")
+        raise HTTPException(status_code=503, detail="Persistence not available - set MONGODB_URL")
     try:
         oid = ObjectId(run_id)
     except InvalidId:
@@ -97,7 +97,7 @@ async def get_stats(
 ) -> StatsResponse:
     """Aggregate detection stats for this session via MongoDB pipeline.
 
-    Uses $group + $size to count total contradictions in a single round-trip,
+    Uses $group + $size to count total violations in a single round-trip,
     then two count_documents calls for confirmed-rate from the feedback
     collection.  The aggregation pipeline demonstrates production MongoDB usage.
     """
@@ -109,13 +109,13 @@ async def get_stats(
         {"$group": {
             "_id": None,
             "total_runs": {"$sum": 1},
-            "total_contradictions": {"$sum": {"$size": "$contradictions"}},
+            "total_violations": {"$sum": {"$size": "$violations"}},
             "run_ids": {"$push": "$_id"},
         }},
     ]
     agg = await db.detection_runs.aggregate(pipeline).to_list(1)
     if not agg:
-        return StatsResponse(total_runs=0, total_contradictions=0, confirmed_rate=0.0)
+        return StatsResponse(total_runs=0, total_violations=0, confirmed_rate=0.0)
     run_ids = agg[0]["run_ids"]
     fb_pipeline = [
         {"$match": {"run_id": {"$in": run_ids}}},
@@ -131,6 +131,6 @@ async def get_stats(
     confirmed_rate = confirmed / total_feedback if total_feedback > 0 else 0.0
     return StatsResponse(
         total_runs=agg[0]["total_runs"],
-        total_contradictions=agg[0]["total_contradictions"],
+        total_violations=agg[0]["total_violations"],
         confirmed_rate=round(confirmed_rate, 4),
     )

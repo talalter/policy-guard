@@ -1,1 +1,1 @@
-"""FastAPI route modules — one file per resource."""
+"""FastAPI route modules - one file per resource."""

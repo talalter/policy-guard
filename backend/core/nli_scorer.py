@@ -101,7 +101,7 @@ class NLIScorer:
         self._model = AutoModelForSequenceClassification.from_pretrained(_MODEL_NAME)
         self._model.eval()
         self._label2idx = {v.lower(): k for k, v in self._model.config.id2label.items()}
-        logger.info("NLI model loaded — label map: %s", self._label2idx)
+        logger.info("NLI model loaded - label map: %s", self._label2idx)
 
     def _compute_similarity_matrix(
         self, premises: list[str], hypotheses: list[str]
@@ -126,7 +126,7 @@ class NLIScorer:
         """Select top-K premise candidates per hypothesis, apply similarity threshold.
 
         Filters pairs below _NLI_MIN_SIMILARITY. The cross-encoder is the right
-        place to reject bad pairs — no lexical overlap gate is applied here, so
+        place to reject bad pairs - no lexical overlap gate is applied here, so
         policy rules that use different vocabulary from the agent action are not
         silently dropped before NLI sees them.
 
@@ -236,7 +236,7 @@ class NLIScorer:
         tool_ctx = is_tool_context(context)
         if tool_ctx:
             context = flatten_tool_context(context)
-            logger.debug("Tool call context detected — applied prose normalisation")
+            logger.debug("Tool call context detected - applied prose normalisation")
 
         premises = split_sentences(context)
         hypotheses = split_sentences(response)
@@ -248,7 +248,7 @@ class NLIScorer:
         )
 
         if not premises or not hypotheses:
-            logger.warning("No sentence pairs to score — empty context or response")
+            logger.warning("No sentence pairs to score - empty context or response")
             return
 
         full_cross_product = len(premises) * len(hypotheses)

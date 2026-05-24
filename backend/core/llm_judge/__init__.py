@@ -1,12 +1,12 @@
-"""LLM judge package — provider-agnostic interface for contradiction detection.
+"""LLM judge package - provider-agnostic interface for contradiction detection.
 
 Provider is selected at startup via settings.llm_provider ("openai" or "claude").
 Both implementations share the same tool definitions and agentic loop logic;
 only the API client and message formatting differ.
 
 Public API:
-    BaseLLMJudge    — abstract base for type annotations
-    create_llm_judge — factory that returns the configured provider instance
+    BaseLLMJudge    - abstract base for type annotations
+    create_llm_judge - factory that returns the configured provider instance
 """
 
 from backend.config import settings

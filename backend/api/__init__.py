@@ -1,1 +1,1 @@
-"""HTTP layer — dependency providers and route handlers."""
+"""HTTP layer - dependency providers and route handlers."""

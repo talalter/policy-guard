@@ -12,8 +12,8 @@ final response is faithful to what its tools actually returned:
 
 The guard accumulates tool outputs during the run, then runs the full
 NLI + LLM ensemble against the agent's final response when the chain ends.
-If contradictions are found they are logged as warnings.  Pass
-raise_on_contradiction=True to raise FaithfulnessViolationError instead —
+If violations are found they are logged as warnings.  Pass
+raise_on_violation=True to raise FaithfulnessViolationError instead -
 useful in test suites or strict pipelines.
 """
 
@@ -28,20 +28,20 @@ except ImportError as exc:
     ) from exc
 
 from backend.core.router import Router
-from backend.models import Contradiction
+from backend.models import Violation
 
 logger = logging.getLogger(__name__)
 
 
 class FaithfulnessViolationError(Exception):
-    """Raised by FaithfulnessGuard when the agent response contradicts tool outputs."""
+    """Raised by FaithfulnessGuard when the agent response violates policy."""
 
-    def __init__(self, contradictions: list[Contradiction]) -> None:
-        """Store contradictions and build a human-readable message."""
-        self.contradictions = contradictions
-        count = len(contradictions)
+    def __init__(self, violations: list[Violation]) -> None:
+        """Store violations and build a human-readable message."""
+        self.violations = violations
+        count = len(violations)
         super().__init__(
-            f"Agent response contains {count} contradiction(s) with tool outputs."
+            f"Agent response contains {count} violation(s) with tool outputs."
         )
 
 
@@ -56,19 +56,19 @@ class FaithfulnessGuard(BaseCallbackHandler):
     def __init__(
         self,
         router: Router,
-        raise_on_contradiction: bool = False,
+        raise_on_violation: bool = False,
     ) -> None:
         """Initialise the guard with a Router (full NLI + LLM ensemble).
 
         Args:
-            router: A Router instance — runs NLI first, escalates uncertain
+            router: A Router instance - runs NLI first, escalates uncertain
                 pairs to the LLM judge only when needed.
-            raise_on_contradiction: If True, raise FaithfulnessViolationError
-                instead of logging a warning when contradictions are found.
+            raise_on_violation: If True, raise FaithfulnessViolationError
+                instead of logging a warning when violations are found.
         """
         super().__init__()
         self._router = router
-        self._raise_on_contradiction = raise_on_contradiction
+        self._raise_on_violation = raise_on_violation
         self._tool_outputs: list[str] = []
 
     def on_tool_end(self, output: str, **kwargs) -> None:
@@ -88,23 +88,23 @@ class FaithfulnessGuard(BaseCallbackHandler):
     def _check_and_reset(self, context: str, response: str) -> None:
         """Run the full ensemble check, then clear accumulated tool outputs."""
         try:
-            contradictions, _ = self._router.route(context, response)
-            self._report(contradictions)
+            violations, _ = self._router.route(context, response)
+            self._report(violations)
         finally:
             self._tool_outputs.clear()
 
-    def _report(self, contradictions: list[Contradiction]) -> None:
-        """Log or raise findings depending on raise_on_contradiction."""
-        if not contradictions:
+    def _report(self, violations: list[Violation]) -> None:
+        """Log or raise findings depending on raise_on_violation."""
+        if not violations:
             logger.debug("FaithfulnessGuard: response is faithful to tool outputs")
             return
         logger.warning(
-            "FaithfulnessGuard: %d contradiction(s) detected in agent response",
-            len(contradictions),
+            "FaithfulnessGuard: %d violation(s) detected in agent response",
+            len(violations),
         )
-        for c in contradictions:
+        for v in violations:
             logger.warning(
-                "  [%s | conf=%.2f] %s", c.severity.value, c.confidence, c.explanation
+                "  [%s | conf=%.2f] %s", v.severity.value, v.confidence, v.explanation
             )
-        if self._raise_on_contradiction:
-            raise FaithfulnessViolationError(contradictions)
+        if self._raise_on_violation:
+            raise FaithfulnessViolationError(violations)

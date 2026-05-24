@@ -6,13 +6,13 @@ GPT-5.4-mini cost, and writes results to data/benchmark_results.json.
 
 Prediction rule:
     An example is considered a *positive* prediction if the pipeline returns
-    at least one Contradiction object (len(contradictions) > 0).
+    at least one Violation object (len(violations) > 0).
 
 Cost model (gpt-5.4-mini standard pricing, 2026):
     Token counts: read from resp.usage after every API call.
     Multi-turn cost: summed across all tool-loop iterations (each request charges for
     the full growing conversation, so simple summing gives the true billed amount).
-    NLI runs locally — always $0.00.
+    NLI runs locally - always $0.00.
 
 Usage:
     python -m backend.tools.benchmark
@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from backend.config import settings  # noqa: E402
 from backend.core import BaseLLMJudge, NLIScorer, Router  # noqa: E402
-from backend.core.router import nli_to_contradiction  # noqa: E402
+from backend.core.router import nli_to_violation  # noqa: E402
 from backend.models import BenchmarkResult, DetectionMethod  # noqa: E402
 from backend.utils.dedup import deduplicate  # noqa: E402
 
@@ -82,8 +82,8 @@ def _flatten_policy_benchmark(data: dict) -> tuple[list[dict], int]:
     """Flatten the nested policy-benchmark format into a flat list of examples.
 
     Label mapping:
-        FAIL / PARTIAL  → has_contradiction=True
-        PASS            → has_contradiction=False
+        FAIL / PARTIAL  → has_violation=True
+        PASS            → has_violation=False
         UNCERTAIN       → excluded (ground truth genuinely unknown)
 
     Returns (examples, uncertain_count).
@@ -98,7 +98,7 @@ def _flatten_policy_benchmark(data: dict) -> tuple[list[dict], int]:
             flat.append({
                 "context": policy["policy_text"],
                 "response": ex["response"],
-                "has_contradiction": _POLICY_LABEL_TO_BOOL[ex["label"]],
+                "has_violation": _POLICY_LABEL_TO_BOOL[ex["label"]],
                 "contradiction_type": ex.get("primary_reasoning_type", "unknown"),
                 "difficulty": ex.get("difficulty", "unknown"),
                 "label": ex["label"],
@@ -144,7 +144,7 @@ def _compute_metrics(
     ground_truth: list[bool],
     predictions: list[bool],
 ) -> tuple[float, float, float]:
-    """Compute precision, recall, and F1 for binary contradiction detection.
+    """Compute precision, recall, and F1 for binary violation detection.
 
     Returns (precision, recall, f1) rounded to 4 decimal places.
     Undefined metrics (zero denominator) are returned as 0.0.
@@ -167,7 +167,7 @@ def _compute_fpr(ground_truth: list[bool], predictions: list[bool]) -> float:
     """Compute False Positive Rate: FP / (FP + TN).
 
     Answers: of all faithful responses, what fraction did we wrongly flag?
-    Directly maps to alert fatigue — the security practitioner's primary concern.
+    Directly maps to alert fatigue - the security practitioner's primary concern.
     """
     fp = sum((not g) and p for g, p in zip(ground_truth, predictions))
     tn = sum((not g) and (not p) for g, p in zip(ground_truth, predictions))
@@ -178,7 +178,7 @@ def _compute_auc_roc(ground_truth: list[bool], scores: list[float]) -> float:
     """Compute AUC-ROC across all confidence thresholds.
 
     Unlike F1 at a fixed threshold, AUC-ROC measures intrinsic discriminative
-    power — how well the model separates positives from negatives regardless of
+    power - how well the model separates positives from negatives regardless of
     where the decision boundary is set.
     """
     if len(set(ground_truth)) < 2:
@@ -226,7 +226,7 @@ def _compute_per_group(
     groups: dict[str, list[tuple[bool, bool]]] = defaultdict(list)
     for ex, pred in zip(examples, predictions):
         group = ex.get(key) or "none"
-        groups[group].append((ex["has_contradiction"], pred))
+        groups[group].append((ex["has_violation"], pred))
 
     result = {}
     for group, pairs in groups.items():
@@ -259,13 +259,13 @@ def _run_nli_only(
         latencies_ms.append((time.perf_counter() - t_start) * 1000)
         # Apply the same confidence gate and deduplication the router uses so the
         # NLI-only metric is computed on the same basis as the ensemble path.
-        contradictions = deduplicate([
-            nli_to_contradiction(r)
+        violations = deduplicate([
+            nli_to_violation(r)
             for r in results
             if r.label == "contradiction" and r.confidence >= settings.nli_confidence_threshold
         ])
-        predictions.append(len(contradictions) > 0)
-        scores.append(max((c.confidence for c in contradictions), default=0.0))
+        predictions.append(len(violations) > 0)
+        scores.append(max((v.confidence for v in violations), default=0.0))
         costs.append(0.0)
     return _MethodRun(predictions=predictions, scores=scores, latencies_ms=latencies_ms, costs=costs)
 
@@ -278,15 +278,15 @@ def _run_llm_only(
     predictions, scores, latencies_ms, costs = [], [], [], []
     for example in tqdm(examples, desc="LLM only", unit="ex"):
         t_start = time.perf_counter()
-        contradictions = judge.judge(
+        violations = judge.judge(
             context=example["context"],
             response=example["response"],
             candidate_pairs=[],
             uncertain_pairs=[],
         )
         latencies_ms.append((time.perf_counter() - t_start) * 1000)
-        predictions.append(len(contradictions) > 0)
-        scores.append(max((c.confidence for c in contradictions), default=0.0))
+        predictions.append(len(violations) > 0)
+        scores.append(max((v.confidence for v in violations), default=0.0))
         costs.append(_actual_llm_cost(judge))
     return _MethodRun(predictions=predictions, scores=scores, latencies_ms=latencies_ms, costs=costs)
 
@@ -300,10 +300,10 @@ def _run_ensemble(
     predictions, scores, latencies_ms, costs = [], [], [], []
     for example in tqdm(examples, desc="Ensemble", unit="ex"):
         t_start = time.perf_counter()
-        contradictions, metadata = router.route(example["context"], example["response"])
+        violations, metadata = router.route(example["context"], example["response"])
         latencies_ms.append((time.perf_counter() - t_start) * 1000)
-        predictions.append(len(contradictions) > 0)
-        scores.append(max((c.confidence for c in contradictions), default=0.0))
+        predictions.append(len(violations) > 0)
+        scores.append(max((v.confidence for v in violations), default=0.0))
         # Cost is $0 when NLI resolved it without LLM escalation.
         if metadata.get("llm_escalated", 0) > 0:
             costs.append(_actual_llm_cost(judge))
@@ -405,7 +405,7 @@ def _save_results(results: list[BenchmarkResult], path: Path) -> None:
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run contradiction detection benchmark.")
+    parser = argparse.ArgumentParser(description="Run policy violation detection benchmark.")
     parser.add_argument(
         "--dataset",
         type=Path,
@@ -440,7 +440,7 @@ def main() -> None:
     judge = router.get_judge()
 
     examples = _load_examples(dataset_path)
-    ground_truth = [ex["has_contradiction"] for ex in examples]
+    ground_truth = [ex["has_violation"] for ex in examples]
     print(f"Running benchmark on {len(examples)} examples from {dataset_path.name}...\n")
 
     nli_run = _run_nli_only(examples, scorer)

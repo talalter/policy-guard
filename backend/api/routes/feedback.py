@@ -20,20 +20,19 @@ async def submit_feedback(
     body: FeedbackRequest,
     db=Depends(get_db),
 ) -> None:
-    """Store user verdict on a single contradiction finding.
+    """Store user verdict on a single violation finding.
 
     Builds a feedback loop: confirmed/false-positive labels accumulate in the
     'feedback' collection and are surfaced as confirmed_rate in GET /stats.
     """
     if db is None:
-        raise HTTPException(status_code=503, detail="Persistence not available — set MONGODB_URL")
+        raise HTTPException(status_code=503, detail="Persistence not available - set MONGODB_URL")
     try:
         oid = ObjectId(run_id)
     except InvalidId:
         raise HTTPException(status_code=400, detail="Invalid run_id")
-    await db.feedback.insert_one({
-        "run_id": oid,
-        "contradiction_index": body.contradiction_index,
-        "verdict": body.verdict.value,
-        "timestamp": datetime.now(timezone.utc),
-    })
+    await db.feedback.update_one(
+        {"run_id": oid, "violation_index": body.violation_index},
+        {"$set": {"verdict": body.verdict.value, "timestamp": datetime.now(timezone.utc)}},
+        upsert=True,
+    )

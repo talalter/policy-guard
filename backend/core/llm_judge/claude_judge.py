@@ -29,7 +29,7 @@ _CLAUDE_TOOLS: list[dict] = [
     {"name": "find_surrounding_context",
      "description": "Retrieve text surrounding a span to check for negation or conditional scoping by nearby sentences.",
      "input_schema": _FIND_CONTEXT_PARAMS},
-    {"name": "report_contradictions",
+    {"name": "report_violations",
      "description": "Submit the final analysis. Call once when all findings are verified.",
      "input_schema": _REPORT_PARAMS},
 ]
@@ -46,7 +46,7 @@ def _process_claude_calls(
     for block in content_blocks:
         if block.type != "tool_use":
             continue
-        if block.name == "report_contradictions":
+        if block.name == "report_violations":
             report = _JudgeResponse.model_validate(block.input)
         else:
             tool_results.append({
@@ -68,7 +68,7 @@ class ClaudeJudge(BaseLLMJudge):
         logger.info("ClaudeJudge initialised (model=%s)", settings.claude_model)
 
     def _call_api(self, context: str, response: str, user_message: str) -> _JudgeResponse:
-        """Run the Claude agentic tool loop until report_contradictions is called."""
+        """Run the Claude agentic tool loop until report_violations is called."""
         messages: list[dict] = [{"role": "user", "content": user_message}]
         self._last_input_tokens = 0
         self._last_output_tokens = 0
@@ -80,7 +80,7 @@ class ClaudeJudge(BaseLLMJudge):
                 system=_SYSTEM_PROMPT,
                 messages=messages, # type: ignore
                 tools=_CLAUDE_TOOLS,  # type: ignore
-                tool_choice={"type": "tool", "name": "report_contradictions"} if force else {"type": "auto"},
+                tool_choice={"type": "tool", "name": "report_violations"} if force else {"type": "auto"},
             )
             # Each request charges for the full growing conversation.
             self._last_input_tokens += resp.usage.input_tokens
@@ -92,5 +92,5 @@ class ClaudeJudge(BaseLLMJudge):
             if not tool_results:
                 break
             messages.append({"role": "user", "content": tool_results})
-        logger.warning("Claude judge loop exhausted after %d iterations without report_contradictions call", _MAX_TOOL_ITERATIONS)
-        return _JudgeResponse(overall_reasoning="Loop exhausted without report.", contradictions=[])
+        logger.warning("Claude judge loop exhausted after %d iterations without report_violations call", _MAX_TOOL_ITERATIONS)
+        return _JudgeResponse(overall_reasoning="Loop exhausted without report.", violations=[])

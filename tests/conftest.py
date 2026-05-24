@@ -1,6 +1,6 @@
 """Shared fixtures for integration tests.
 
-All fixtures are session-scoped — ML models take ~30s to load and must not
+All fixtures are session-scoped - ML models take ~30s to load and must not
 be re-instantiated for every test.  Mark any test that uses these fixtures
 with @pytest.mark.integration so they can be skipped in fast CI runs:
 
@@ -34,7 +34,7 @@ def examples() -> list[dict]:
 
 @pytest.fixture(scope="session")
 def nli_scorer():
-    """Load NLIScorer once per test session — model download ~1.5 GB on first run."""
+    """Load NLIScorer once per test session - model download ~1.5 GB on first run."""
     from backend.core import NLIScorer
     return NLIScorer()
 

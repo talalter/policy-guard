@@ -5,7 +5,7 @@ Architecture:
     2. Branch each result into a 'candidate' bucket (≥ threshold) or an
        'uncertain' bucket (≥ escalation_floor) without buffering the full list.
     3. Pass all NLI pairs (candidates + uncertain) to the LLM judge as hints.
-    4. The LLM makes every final output decision — NLI narrows the search space,
+    4. The LLM makes every final output decision - NLI narrows the search space,
        never bypasses review.
     5. Deduplicate overlapping response spans using Jaccard similarity.
 
@@ -18,30 +18,30 @@ import logging
 from backend.config import settings
 from backend.core.llm_judge import BaseLLMJudge, create_llm_judge
 from backend.core.nli_scorer import NLIScorer
-from backend.models import Contradiction, DetectionMethod, NLIResult, Severity
+from backend.models import Violation, DetectionMethod, NLIResult, Severity
 from backend.utils.dedup import deduplicate
 
 logger = logging.getLogger(__name__)
 
 _THRESHOLD = settings.nli_confidence_threshold
-_DIRECT_CONFIDENCE_CUTOFF = settings.direct_severity_threshold
+_BLOCKING_CONFIDENCE_CUTOFF = settings.direct_severity_threshold
 _ESCALATION_FLOOR = settings.nli_escalation_floor
 _LLM_SIGNAL_FLOOR = settings.llm_signal_floor
 _FORCE_LLM = settings.force_llm
 
 
-def nli_to_contradiction(result: NLIResult) -> Contradiction:
-    """Convert a high-confidence NLI contradiction result to a Contradiction object.
+def nli_to_violation(result: NLIResult) -> Violation:
+    """Convert a high-confidence NLI contradiction result to a Violation object.
 
     Used by the benchmark's NLI-only evaluation path. Not used in the ensemble
-    route() — NLI candidates are passed to the LLM as hints there.
+    route() - NLI candidates are passed to the LLM as hints there.
     """
     severity = (
-        Severity.DIRECT
-        if result.confidence >= _DIRECT_CONFIDENCE_CUTOFF
-        else Severity.PARTIAL
+        Severity.BLOCKING
+        if result.confidence >= _BLOCKING_CONFIDENCE_CUTOFF
+        else Severity.WARNING
     )
-    return Contradiction(
+    return Violation(
         response_span=result.pair.hypothesis,
         context_span=result.pair.premise,
         explanation=(
@@ -84,7 +84,7 @@ def _partition_results(
                 nli_result.pair.hypothesis[:60],
             )
         elif nli_result.contradiction_score >= _ESCALATION_FLOOR:
-            # NLI sees some contradiction signal but is not confident — send to LLM.
+            # NLI sees some contradiction signal but is not confident - send to LLM.
             # Purely neutral pairs (low contradiction_score) are skipped entirely.
             uncertain_pairs.append(nli_result)
             logger.debug(
@@ -100,7 +100,7 @@ class Router:
     """Orchestrates NLIScorer and LLMJudge with NLI pre-filtering.
 
     Instantiates both sub-components once so their models stay resident in
-    memory across multiple calls — critical for low-latency production use.
+    memory across multiple calls - critical for low-latency production use.
     """
 
     def __init__(self) -> None:
@@ -119,8 +119,8 @@ class Router:
 
     def route(
         self, context: str, response: str
-    ) -> tuple[list[Contradiction], dict]:
-        """Run the full detection pipeline and return contradictions + metadata.
+    ) -> tuple[list[Violation], dict]:
+        """Run the full detection pipeline and return violations + metadata.
 
         Steps:
             1. Stream NLI results and partition into candidates / uncertain.
@@ -133,8 +133,8 @@ class Router:
 
         Returns:
             A tuple of:
-                - list[Contradiction] sorted by confidence descending.
-                - dict with routing metadata for ContradictionReport.
+                - list[Violation] sorted by confidence descending.
+                - dict with routing metadata for ViolationReport.
         """
         nli_stream = self._scorer.score(context, response)
         candidate_pairs, uncertain_pairs, total_pairs, max_nli_score = _partition_results(
@@ -153,7 +153,7 @@ class Router:
 
         if not llm_should_run:
             logger.info(
-                "LLM skipped — peak NLI score %.2f is below signal floor %.2f",
+                "LLM skipped - peak NLI score %.2f is below signal floor %.2f",
                 max_nli_score,
                 _LLM_SIGNAL_FLOOR,
             )
@@ -166,31 +166,35 @@ class Router:
                 "after_dedup": 0,
             }
 
-        llm_contradictions = self._judge.judge(
+        llm_violations = self._judge.judge(
             context=context,
             response=response,
             candidate_pairs=candidate_pairs,
             uncertain_pairs=uncertain_pairs,
         )
-        logger.info("LLM judge returned %d contradiction(s)", len(llm_contradictions))
+        logger.info("LLM judge returned %d violation(s)", len(llm_violations))
 
-        all_contradictions = deduplicate(llm_contradictions)
-        all_contradictions.sort(key=lambda c: c.confidence, reverse=True)
+        all_violations = deduplicate(llm_violations)
+        all_violations.sort(key=lambda v: v.confidence, reverse=True)
 
+        usage = self._judge.get_last_usage()
         metadata = {
             "nli_pairs_checked": total_pairs,
             "nli_candidates": len(candidate_pairs),
             "llm_escalated": len(uncertain_pairs),
             "llm_called": True,
-            "llm_caught": len(llm_contradictions),
-            "after_dedup": len(all_contradictions),
+            "llm_caught": len(llm_violations),
+            "after_dedup": len(all_violations),
+            "overall_reasoning": self._judge.get_last_reasoning(),
+            "input_tokens": usage["input_tokens"],
+            "output_tokens": usage["output_tokens"],
         }
 
         logger.info(
-            "Router complete: %d unique contradiction(s) (llm=%d, dedup_dropped=%d)",
-            len(all_contradictions),
-            len(llm_contradictions),
-            len(llm_contradictions) - len(all_contradictions),
+            "Router complete: %d unique violation(s) (llm=%d, dedup_dropped=%d)",
+            len(all_violations),
+            len(llm_violations),
+            len(llm_violations) - len(all_violations),
         )
 
-        return all_contradictions, metadata
+        return all_violations, metadata

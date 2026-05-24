@@ -1,4 +1,4 @@
-"""FastAPI dependency providers — inject shared objects from app.state.
+"""FastAPI dependency providers - inject shared objects from app.state.
 
 All Depends() callables live here so route modules stay focused on
 HTTP concerns and the injection wiring is visible in one place.

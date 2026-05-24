@@ -1,6 +1,6 @@
-"""Deduplication utilities: Jaccard similarity and contradiction span matching."""
+"""Deduplication utilities: Jaccard similarity and violation span matching."""
 
-from backend.models import Contradiction
+from backend.models import Violation
 
 
 def tokenize(text: str) -> set[str]:
@@ -18,24 +18,24 @@ def jaccard(a: str, b: str) -> float:
 
 
 def deduplicate(
-    contradictions: list[Contradiction],
+    violations: list[Violation],
     threshold: float = 0.5,
-) -> list[Contradiction]:
-    """Remove contradictions whose response_span overlaps a higher-confidence finding.
+) -> list[Violation]:
+    """Remove violations whose response_span overlaps a higher-confidence finding.
 
     Iterates the list (sorted confidence-descending) and drops any entry whose
     response_span has Jaccard similarity ≥ threshold with an already-accepted span.
     This prevents showing the same surface error twice when both NLI and the LLM flag it.
 
     Args:
-        contradictions: List of Contradiction objects to deduplicate.
+        violations: List of Violation objects to deduplicate.
         threshold: Jaccard similarity threshold for deduplication.
 
     Returns:
         Deduplicated list sorted by confidence descending.
     """
-    sorted_by_conf = sorted(contradictions, key=lambda c: c.confidence, reverse=True)
-    deduplicated: list[Contradiction] = []
+    sorted_by_conf = sorted(violations, key=lambda v: v.confidence, reverse=True)
+    deduplicated: list[Violation] = []
 
     for candidate in sorted_by_conf:
         is_duplicate = any(

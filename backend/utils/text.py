@@ -17,7 +17,7 @@ def _ensure_nltk_punkt() -> None:
         nltk.download("punkt_tab", quiet=True)
 
 
-# Download once at import time — not on every sentence split.
+# Download once at import time - not on every sentence split.
 _ensure_nltk_punkt()
 
 

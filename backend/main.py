@@ -35,10 +35,10 @@ async def lifespan(app: FastAPI):
 
     Router.__init__ loads both NLIScorer and LLMJudge.  We reuse those
     instances for the nli-only and llm-only endpoints so model weights are
-    loaded exactly once per process.  MongoDB connection is best-effort —
+    loaded exactly once per process.  MongoDB connection is best-effort -
     the app starts successfully even if no Mongo instance is available.
     """
-    logger.info("Loading models — this may take a moment on first run.")
+    logger.info("Loading models - this may take a moment on first run.")
     pipeline = Router()
     app.state.router = pipeline
     app.state.nli_scorer = pipeline.get_scorer()
@@ -61,7 +61,7 @@ def create_app() -> FastAPI:
         title="Policy Guard",
         description=(
             "Runtime guardrail that reads existing policy documents and detects "
-            "when an AI agent's planned actions violate them — no manual rule encoding required."
+            "when an AI agent's planned actions violate them - no manual rule encoding required."
         ),
         version="1.0.0",
         lifespan=lifespan,
@@ -81,7 +81,7 @@ def create_app() -> FastAPI:
 
     @_app.get("/health")
     async def health() -> dict:
-        """Liveness probe — returns 200 once the app is ready."""
+        """Liveness probe - returns 200 once the app is ready."""
         return {"status": "ok"}
 
     return _app

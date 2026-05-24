@@ -11,7 +11,7 @@ import logging
 from pydantic import BaseModel, Field, field_validator
 
 from backend.config import settings
-from backend.models import Contradiction, DetectionMethod, NLIResult, Severity
+from backend.models import Violation, DetectionMethod, NLIResult, Severity
 
 logger = logging.getLogger(__name__)
 
@@ -79,28 +79,28 @@ Do NOT add a finding when:
   targets (e.g., restriction covers external users; agent is an internal service; restriction
   covers production; agent targets staging).
 - The finding is that two spans say the same thing in different words with no policy rule
-  between them (genuine synonym/paraphrase) — set is_paraphrase_or_equivalent=True for this
+  between them (genuine synonym/paraphrase) - set is_paraphrase_or_equivalent=True for this
   case only. Do NOT set it for uncertainty; lower the confidence score instead.
 
-OMISSION VIOLATIONS — flag when:
+OMISSION VIOLATIONS - flag when:
   The policy requires a prerequisite (approval, documentation, configuration, specific action)
   for something the agent performs, and the agent's response does not record that prerequisite
-  being satisfied. The RESPONSE is the compliance record — absence of required evidence in the
+  being satisfied. The RESPONSE is the compliance record - absence of required evidence in the
   agent's own action log IS a compliance failure. Exception: the prerequisite applies to a
   different actor, scope, or environment than the agent's action.
 
-CONDITIONAL VIOLATIONS — flag when:
+CONDITIONAL VIOLATIONS - flag when:
   The policy says "X is allowed only if Y", the agent does X, and the agent's response does
-  not confirm Y was satisfied. Do not require separate proof that Y failed — if the agent's
+  not confirm Y was satisfied. Do not require separate proof that Y failed - if the agent's
   compliance log omits Y, Y did not happen. Exception: the rule applies to a different scope
   or the agent explicitly states Y was satisfied elsewhere in the response.
 
 SEVERITY - assign to each finding:
-- direct:    Agent's action directly and explicitly violates a single policy statement;
+- blocking:  Agent's action directly and explicitly violates a single policy statement;
              one sentence from CONTEXT is enough to establish the violation.
-- partial:   Violation requires mild inference across adjacent policy sentences, or the
+- warning:   Violation requires mild inference across adjacent policy sentences, or the
              action is only partially restricted.
-- multi-hop: Violation only emerges by combining two or more separate policy rules;
+- inferred:  Violation only emerges by combining two or more separate policy rules;
              no single rule alone is sufficient to establish it.
 
 TOOL CALL RESULTS - when CONTEXT is structured tool output (lines like "Tool: <name>"
@@ -126,7 +126,7 @@ VERIFICATION TOOLS - use before committing to any finding:
 - find_surrounding_context(span, source): retrieves surrounding text to confirm a span is not
   negated, conditionally scoped, or already acknowledged by adjacent sentences.
 
-When all verifications are done, call report_contradictions exactly once.
+When all verifications are done, call report_violations exactly once.
 """
 
 _USER_TEMPLATE = """\
@@ -141,14 +141,14 @@ HIGH-CONFIDENCE NLI FINDINGS (contradiction confidence ≥ {threshold:.0%}):
 
 NLI is highly confident these sentence pairs contradict each other.
 Default posture: treat each one as a real violation. Call verify_span to confirm the spans
-exist verbatim, then report — unless you find a specific reason it is wrong: a different
+exist verbatim, then report - unless you find a specific reason it is wrong: a different
 scope or role, a genuine synonym, or the agent explicitly acknowledging the restriction.
 
 UNCERTAIN NLI PAIRS (some signal, below confidence threshold):
 {uncertain_pairs}
 
 NLI saw some contradiction signal here but was not confident. Default posture: neutral.
-Use these as starting points — verify each one independently and report only if you
+Use these as starting points - verify each one independently and report only if you
 confirm a genuine policy violation.
 
 Analyse the full policy document and agent action, then report every policy violation you find.
@@ -157,8 +157,8 @@ Analyse the full policy document and agent action, then report every policy viol
 
 # ── Pydantic schemas ──────────────────────────────────────────────────────────
 
-class _ContradictionItem(BaseModel):
-    """Single contradiction finding returned by the model."""
+class _ViolationItem(BaseModel):
+    """Single violation finding returned by the model."""
 
     reasoning: str
     is_paraphrase_or_equivalent: bool
@@ -173,8 +173,8 @@ class _ContradictionItem(BaseModel):
     def coerce_severity(cls, v: object) -> object:
         """Map unrecognised severity strings to 'partial' rather than crashing."""
         if isinstance(v, str) and v not in {s.value for s in Severity}:
-            logger.warning("LLM returned unknown severity %r; coercing to 'partial'", v)
-            return Severity.PARTIAL
+            logger.warning("LLM returned unknown severity %r; coercing to 'warning'", v)
+            return Severity.WARNING
         return v
 
 
@@ -182,7 +182,7 @@ class _JudgeResponse(BaseModel):
     """Top-level structured output from the LLM judge."""
 
     overall_reasoning: str
-    contradictions: list[_ContradictionItem]
+    violations: list[_ViolationItem]
 
 
 # ── Tool parameter schemas (shared between providers) ─────────────────────────
@@ -218,7 +218,7 @@ _FIND_CONTEXT_PARAMS = {
 def _inline_refs(schema: dict) -> dict:
     """Resolve all $ref pointers inline so OpenAI function calling enforces enum constraints.
 
-    OpenAI does not follow $defs/$ref — leaving them in place means enum constraints
+    OpenAI does not follow $defs/$ref - leaving them in place means enum constraints
     are silently ignored by the API, allowing any string through.
     """
     defs = schema.get("$defs", {})
@@ -300,7 +300,7 @@ def _execute_tool(name: str, args: dict, context: str, response: str) -> str:
 # ── Shared helpers ────────────────────────────────────────────────────────────
 
 def _format_candidate_pairs(pairs: list[NLIResult]) -> str:
-    """Render high-confidence NLI candidates — show confidence prominently."""
+    """Render high-confidence NLI candidates - show confidence prominently."""
     if not pairs:
         return "(none)"
     lines = []
@@ -314,7 +314,7 @@ def _format_candidate_pairs(pairs: list[NLIResult]) -> str:
 
 
 def _format_uncertain_pairs(pairs: list[NLIResult]) -> str:
-    """Render uncertain NLI pairs — show raw contradiction score."""
+    """Render uncertain NLI pairs - show raw NLI contradiction score."""
     if not pairs:
         return "(none)"
     lines = []
@@ -343,7 +343,7 @@ def _build_user_message(
     )
 
 
-def _filter_genuine(items: list[_ContradictionItem]) -> list[_ContradictionItem]:
+def _filter_genuine(items: list[_ViolationItem]) -> list[_ViolationItem]:
     """Drop paraphrase findings and those below the minimum confidence threshold."""
     return [
         item for item in items
@@ -351,10 +351,10 @@ def _filter_genuine(items: list[_ContradictionItem]) -> list[_ContradictionItem]
     ]
 
 
-def _to_contradictions(items: list[_ContradictionItem]) -> list[Contradiction]:
-    """Convert filtered _ContradictionItem objects to public Contradiction models."""
+def _to_violations(items: list[_ViolationItem]) -> list[Violation]:
+    """Convert filtered _ViolationItem objects to public Violation models."""
     return [
-        Contradiction(
+        Violation(
             response_span=item.response_span,
             context_span=item.context_span,
             explanation=item.explanation,
@@ -386,6 +386,7 @@ class BaseLLMJudge(abc.ABC):
 
     _last_input_tokens: int = 0
     _last_output_tokens: int = 0
+    _last_overall_reasoning: str = ""
 
     def get_last_usage(self) -> dict[str, int]:
         """Return actual token counts from the most recent judge() call.
@@ -399,6 +400,10 @@ class BaseLLMJudge(abc.ABC):
             "output_tokens": self._last_output_tokens,
         }
 
+    def get_last_reasoning(self) -> str:
+        """Return the LLM's overall_reasoning from the most recent judge() call."""
+        return self._last_overall_reasoning
+
     @abc.abstractmethod
     def _call_api(self, context: str, response: str, user_message: str) -> _JudgeResponse:
         """Run the provider-specific agentic loop and return a parsed _JudgeResponse."""
@@ -409,17 +414,17 @@ class BaseLLMJudge(abc.ABC):
         response: str,
         candidate_pairs: list[NLIResult],
         uncertain_pairs: list[NLIResult],
-    ) -> list[Contradiction]:
-        """Run the LLM judge and return genuine contradictions.
+    ) -> list[Violation]:
+        """Run the LLM judge and return genuine violations.
 
         Args:
             context: Source document the response should be faithful to.
             response: LLM-generated text under evaluation.
-            candidate_pairs: High-confidence NLI contradictions — LLM default is to confirm.
-            uncertain_pairs: NLI pairs below confidence threshold — LLM investigates neutrally.
+            candidate_pairs: High-confidence NLI candidates - LLM default is to confirm.
+            uncertain_pairs: NLI pairs below confidence threshold - LLM investigates neutrally.
 
         Returns:
-            List of Contradiction objects with method=DetectionMethod.LLM.
+            List of Violation objects with method=DetectionMethod.LLM.
         """
         user_message = _build_user_message(context, response, candidate_pairs, uncertain_pairs)
         logger.info(
@@ -428,6 +433,7 @@ class BaseLLMJudge(abc.ABC):
             len(uncertain_pairs),
         )
         judge_response = self._call_api(context, response, user_message)
-        genuine = _filter_genuine(judge_response.contradictions)
-        _log_result(judge_response.overall_reasoning, len(judge_response.contradictions), len(genuine))
-        return _to_contradictions(genuine)
+        self._last_overall_reasoning = judge_response.overall_reasoning
+        genuine = _filter_genuine(judge_response.violations)
+        _log_result(judge_response.overall_reasoning, len(judge_response.violations), len(genuine))
+        return _to_violations(genuine)

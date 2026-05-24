@@ -30,12 +30,12 @@ _OPENAI_TOOLS: list[dict] = [
     {"type": "function", "function": {"name": "find_surrounding_context",
         "description": "Retrieve text surrounding a span to check for negation or conditional scoping by nearby sentences.",
         "parameters": _FIND_CONTEXT_PARAMS}},
-    {"type": "function", "function": {"name": "report_contradictions",
+    {"type": "function", "function": {"name": "report_violations",
         "description": "Submit the final analysis. Call once when all findings are verified.",
         "parameters": _REPORT_PARAMS}},
 ]
 
-_OPENAI_FORCE_REPORT: dict = {"type": "function", "function": {"name": "report_contradictions"}}
+_OPENAI_FORCE_REPORT: dict = {"type": "function", "function": {"name": "report_violations"}}
 
 
 def _process_openai_calls(
@@ -48,7 +48,7 @@ def _process_openai_calls(
     report: _JudgeResponse | None = None
     for tc in tool_calls or []:
         args = json.loads(tc.function.arguments)
-        if tc.function.name == "report_contradictions":
+        if tc.function.name == "report_violations":
             report = _JudgeResponse.model_validate(args)
         else:
             tool_msgs.append({
@@ -68,7 +68,7 @@ class OpenAIJudge(BaseLLMJudge):
         logger.info("OpenAIJudge initialised (model=%s)", settings.gpt_model)
 
     def _call_api(self, context: str, response: str, user_message: str) -> _JudgeResponse:
-        """Run the OpenAI agentic tool loop until report_contradictions is called."""
+        """Run the OpenAI agentic tool loop until report_violations is called."""
         messages: list[dict] = [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": user_message},
@@ -101,5 +101,5 @@ class OpenAIJudge(BaseLLMJudge):
             if report is not None:
                 return report
             messages.extend(tool_msgs)
-        logger.warning("OpenAI judge loop exhausted after %d iterations without report_contradictions call", _MAX_TOOL_ITERATIONS)
-        return _JudgeResponse(overall_reasoning="Loop exhausted without report.", contradictions=[])
+        logger.warning("OpenAI judge loop exhausted after %d iterations without report_violations call", _MAX_TOOL_ITERATIONS)
+        return _JudgeResponse(overall_reasoning="Loop exhausted without report.", violations=[])

@@ -1,1 +1,1 @@
-"""Backend package for the contradiction detector."""
+"""Backend package for the policy violation detector."""
