@@ -19,17 +19,17 @@ _ENV_FILE = Path(__file__).parent.parent / ".env"
 
 
 class Settings(BaseSettings):
-    """All runtime configuration — loaded from environment variables / .env file."""
+    """All runtime configuration - loaded from environment variables / .env file."""
 
-    # LLM provider — "openai" (default) or "claude".
+    # LLM provider - "openai" (default) or "claude".
     # Switch by setting LLM_PROVIDER in .env; the corresponding API key must also be set.
     llm_provider: Literal["openai", "claude"] = "openai"
 
-    # OpenAI — required when llm_provider=openai.
+    # OpenAI - required when llm_provider=openai.
     # SecretStr prevents the key from appearing in logs or repr() output.
     openai_api_key: SecretStr
 
-    # Anthropic — required when llm_provider=claude.
+    # Anthropic - required when llm_provider=claude.
     anthropic_api_key: SecretStr | None = None
 
     # NLI scorer
@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     nli_confidence_threshold: float = 0.7
     # Router
     direct_severity_threshold: float = 0.90
-    # Absolute floor for LLM escalation — independent of nli_confidence_threshold.
+    # Absolute floor for LLM escalation - independent of nli_confidence_threshold.
     # Pairs whose contradiction_score exceeds this go to GPT-5.4-mini even when NLI
     # is not confident enough to flag them directly.
     nli_escalation_floor: float = 0.4
@@ -57,7 +57,13 @@ class Settings(BaseSettings):
     llm_signal_floor: float = 0.20
     force_llm: bool = False
 
-    # MongoDB — optional; omit to disable history persistence
+    # Per-token cost in USD - set from provider's published pricing page.
+    # Cost is computed as (input_tokens × price_in) + (output_tokens × price_out).
+    # Defaults to 0.0; set in .env to see exact cost per check in the UI.
+    llm_input_cost_per_token: float = 0.0
+    llm_output_cost_per_token: float = 0.0
+
+    # MongoDB - optional; omit to disable history persistence
     mongodb_url: str | None = None
 
     # API server

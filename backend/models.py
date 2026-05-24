@@ -6,9 +6,9 @@ from pydantic import BaseModel, Field
 
 
 class Severity(str, Enum):
-    DIRECT = "direct"        # premise directly negates hypothesis
-    PARTIAL = "partial"      # premise partially contradicts hypothesis
-    MULTIHOP = "multi-hop"   # requires combining multiple premises
+    BLOCKING = "blocking"    # agent action directly violates a single policy rule
+    WARNING  = "warning"     # violation requires mild inference or is partially restricted
+    INFERRED = "inferred"    # violation emerges by combining two or more policy rules
 
 
 class DetectionMethod(str, Enum):
@@ -31,28 +31,33 @@ class NLIResult(BaseModel):
     pair: SentencePair
     label: str               # "entailment" | "neutral" | "contradiction"
     confidence: float        # softmax probability of the winning label
-    contradiction_score: float  # raw softmax score for the contradiction class
+    contradiction_score: float  # raw softmax score for the NLI contradiction class
     entailment_score: float = 0.0
     neutral_score: float = 0.0
 
 
-class Contradiction(BaseModel):
-    response_span: str       # exact phrase in the response that contradicts
-    context_span: str        # exact phrase in the context being contradicted
+class Violation(BaseModel):
+    response_span: str       # exact phrase in the response that violates policy
+    context_span: str        # exact phrase in the context being violated
     explanation: str         # plain English explanation
     severity: Severity
     method: DetectionMethod  # which method caught this
-    confidence: float        # 0-1, how confident we are this is a real contradiction
+    confidence: float        # 0-1, how confident we are this is a real violation
 
 
-class ContradictionReport(BaseModel):
+class ViolationReport(BaseModel):
     run_id: str | None = None          # populated when MongoDB persistence is enabled
-    faithfulness_score: float          # 0-1, higher = more faithful
-    contradictions: list[Contradiction]
+    compliance_score: float            # 0-1, higher = more compliant
+    violations: list[Violation]
     method_used: DetectionMethod
     nli_pairs_checked: int
-    llm_escalations: int               # how many sentence pairs were escalated to the LLM judge
+    nli_candidates: int = 0            # high-confidence NLI candidates passed to the LLM
+    llm_escalations: int               # sentence pairs escalated to the LLM judge
     processing_time_ms: float
+    overall_reasoning: str | None = None   # LLM chain-of-thought
+    input_tokens: int = 0              # exact input token count from API
+    output_tokens: int = 0             # exact output token count from API
+    cost_usd: float = 0.0              # (input_tokens × price_in) + (output_tokens × price_out)
 
 
 class CheckRequest(BaseModel):
@@ -61,15 +66,15 @@ class CheckRequest(BaseModel):
 
 
 class FeedbackRequest(BaseModel):
-    contradiction_index: int
+    violation_index: int
     verdict: FeedbackVerdict
 
 
 class HistoryItem(BaseModel):
     run_id: str
     timestamp: str                     # ISO 8601
-    faithfulness_score: float
-    contradiction_count: int
+    compliance_score: float
+    violation_count: int
     method_used: str
     provider: str
     context_snippet: str               # first 100 chars of context
@@ -78,17 +83,17 @@ class HistoryItem(BaseModel):
 class HistoryDetail(BaseModel):
     run_id: str
     timestamp: str                     # ISO 8601
-    faithfulness_score: float
+    compliance_score: float
     method_used: str
     provider: str
     context: str
     response: str
-    contradictions: list[Contradiction]
+    violations: list[Violation]
 
 
 class StatsResponse(BaseModel):
     total_runs: int
-    total_contradictions: int
+    total_violations: int
     confirmed_rate: float              # fraction of feedback marked "confirmed"
 
 
