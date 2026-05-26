@@ -32,6 +32,7 @@ AutoModelForSequenceClassification.from_pretrained('dleemiller/ModernCE-base-nli
 
 # Copy application code last — changes here only invalidate this final layer.
 COPY backend/ backend/
+COPY data/ data/
 
 EXPOSE 7860
 
