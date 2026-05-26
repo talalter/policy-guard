@@ -1,5 +1,7 @@
 # Policy Guard
 
+**[Live Demo →](https://policy-guard.vercel.app)**
+
 AI agents reasoning autonomously can violate your documented policies - even when those policies are right there in the system prompt. Policy Guard reads the actual policy document and flags violations in the agent's planned actions before they execute, without requiring you to manually encode any rules.
 
 Paste a policy document (API spec, access rules, security runbook) and an agent's planned action. The system returns a compliance score, the exact violating spans, and the confidence level - in under a second for NLI-only, a few seconds for LLM-backed analysis.
@@ -49,6 +51,7 @@ NLI's role is pre-filtering: narrowing the pairs worth examining, and providing 
 | Persistence | MongoDB, Motor async driver, TTL index, aggregation pipeline |
 | Integration | LangChain callback (`FaithfulnessGuard`) |
 | Frontend | React, Vite |
+| Deployment | Backend on Hugging Face Spaces (Docker), frontend on Vercel |
 
 ---
 
