@@ -1,6 +1,6 @@
 # Policy Guard
 
-**[Live Demo →](https://policy-guard.vercel.app)**
+**[Live Demo](https://policy-guard.vercel.app)**
 
 AI agents reasoning autonomously can violate your documented policies - even when those policies are right there in the system prompt. Policy Guard reads the actual policy document and flags violations in the agent's planned actions before they execute, without requiring you to manually encode any rules.
 
